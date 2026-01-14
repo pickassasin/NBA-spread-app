@@ -1,10 +1,14 @@
-import requests, pandas as pd, numpy as np, os, time
+import requests
+import pandas as pd
+import numpy as np
+import os
+import time
 from datetime import datetime, timedelta
 import streamlit as st
 from sklearn.ensemble import RandomForestClassifier
 
 # ===== CONFIG =====
-API_KEY = st.secrets["ODDS_API_KEY"]
+API_KEY = st.secrets["ODDS_API_KEY"]  # your secret in Streamlit Cloud
 SPORT = "basketball_nba"
 CSV_FILE = "nba_bet_results.csv"
 STAKE = 100
@@ -54,7 +58,7 @@ def fetch_odds():
 
 live_games = fetch_odds()
 
-# ===== FETCH RESULTS (PAST 3 DAYS) =====
+# ===== FETCH PAST RESULTS (PAST 3 DAYS IF AVAILABLE) =====
 results = []
 for i in range(3):
     d = (datetime.today() - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -70,25 +74,29 @@ for i in range(3):
                 "Home Score": g["home_team_score"],
                 "Away Score": g["visitor_team_score"]
             })
-        time.sleep(0.5)  # polite pause for API
+        time.sleep(0.5)  # polite pause
     except Exception as e:
-        st.warning(f"Failed to fetch games for {d}: {e}")
+        st.info(f"No past game data available for {d}: {e}")
 
 results = pd.DataFrame(results)
 
+# ===== CALCULATE RESULT SAFELY =====
 def calc_result(row):
+    if results.empty:
+        return ""
     m = results[
         (results["Home Team"] == row["Home Team"]) &
         (results["Away Team"] == row["Away Team"])
     ]
-    if m.empty: return ""
+    if m.empty:
+        return ""
     return "Win" if (m.iloc[0]["Home Score"] - m.iloc[0]["Away Score"]) > row["Spread"] else "Lose"
 
 if not live_games.empty:
     live_games["Result"] = live_games.apply(calc_result, axis=1)
     live_games["Home Cover %"] = np.clip(0.5 - live_games["Spread"] * 0.025, 0.40, 0.65)
 
-    # ===== TRAIN MODEL =====
+    # ===== TRAIN MODEL IF ENOUGH DATA =====
     train = bets_log[bets_log["Result"].isin(["Win","Lose"])]
     if len(train) >= 5:
         X = train[["Spread","Home Cover %"]]
