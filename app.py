@@ -4,7 +4,7 @@ import streamlit as st
 from sklearn.ensemble import RandomForestClassifier
 
 # ===== CONFIG =====
-API_KEY = st.secrets["c731a372f3deab671feeba9d564b8c75"]
+API_KEY = st.secrets["ODDS_API_KEY"]
 SPORT = "basketball_nba"
 CSV_FILE = "nba_bet_results.csv"
 STAKE = 100
