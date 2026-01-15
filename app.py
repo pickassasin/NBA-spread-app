@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
-import joblib
 from datetime import datetime
 from sklearn.linear_model import LogisticRegression
 
@@ -10,7 +9,6 @@ st.set_page_config(page_title="Daily Sports Predictor", layout="wide")
 
 # ---------------- CONFIG ---------------- #
 HISTORY_FILE = "bet_history.csv"
-
 SPORTS = ["NBA","NFL","NHL"]
 
 # ---------------- UTILITIES ---------------- #
@@ -19,12 +17,6 @@ def init_history():
         pd.DataFrame(columns=[
             "Date","Sport","Home","Away","BetOn","Probability","Result","Units"
         ]).to_csv(HISTORY_FILE,index=False)
-
-def odds_to_prob(odds):
-    # Simple conversion, fallback if odds missing
-    if pd.isna(odds):
-        return 0.5
-    return 100/(odds+100) if odds>0 else abs(odds)/(abs(odds)+100)
 
 def build_elo(history, base=1500, k=20):
     elo = {}
@@ -40,8 +32,8 @@ def build_elo(history, base=1500, k=20):
         elo[a] -= k*(score-expected)
     return elo
 
-# ---------------- DATA ---------------- #
-# Hardcoded daily schedules for testing (replace with live API calls for production)
+# ---------------- DAILY SCHEDULES ---------------- #
+# Replace with API calls for live games if needed
 DAILY_GAMES = {
     "NBA":[
         ("Memphis Grizzlies","Orlando Magic"),
@@ -55,7 +47,7 @@ DAILY_GAMES = {
         ("Minnesota Wild","Winnipeg Jets")
     ],
     "NFL":[
-        # Example: no games Jan 15
+        # No games today (Jan 15, 2026)
     ]
 }
 
@@ -63,9 +55,9 @@ DAILY_GAMES = {
 def train_model(sport, history):
     df = history[history["Sport"]==sport]
     df = df[df["Result"].isin(["WIN","LOSS"])]
+    elo = build_elo(history)
     if len(df)<10:
-        return None
-    elo = build_elo(df)
+        return None, elo  # always return a tuple
     df["EloDiff"] = df["Home"].map(elo).fillna(1500)-df["Away"].map(elo).fillna(1500)
     df["Target"] = (df["Result"]=="WIN").astype(int)
     X = df[["EloDiff"]]
@@ -78,7 +70,7 @@ def train_model(sport, history):
 init_history()
 history = pd.read_csv(HISTORY_FILE)
 tabs = st.tabs(["NBA","NFL","NHL","🔥 Best Bets","📊 Performance"])
-all_bets = []
+all_bets=[]
 
 today = datetime.utcnow().date().isoformat()
 
@@ -89,34 +81,31 @@ for i,sport in enumerate(SPORTS):
             st.info("No games today.")
             continue
 
-        # Train model
-        model, elo = train_model(sport, history) if len(history)>0 else (None, build_elo(history))
+        # Train model and get Elo
+        model, elo = train_model(sport, history)
 
         table = pd.DataFrame({
             "Home":[g[0] for g in games],
-            "Away":[g[1] for g in games],
+            "Away":[g[1] for g in games]
         })
-
-        # Calculate EloDiff
         table["EloDiff"] = table["Home"].map(elo).fillna(1500)-table["Away"].map(elo).fillna(1500)
 
         # Predict probabilities
         if model:
             table["Probability"] = model.predict_proba(table[["EloDiff"]])[:,1]
         else:
-            # Elo-only fallback
             table["Probability"] = 0.5 + 0.05*table["EloDiff"]
 
-        # Determine pick
+        # Determine picks
         if sport=="NHL":
-            table["Edge %"] = (table["Probability"]-0.5)*200  # scale to % edge
+            table["Edge %"] = (table["Probability"]-0.5)*200
             table["BetOn"] = np.where(table["Edge %"]>0, table["Home"], table["Away"])
         else:
             table["BetOn"] = np.where(table["Probability"]>=0.5, table["Home"], table["Away"])
 
         st.dataframe(table,use_container_width=True)
 
-        # Save to history
+        # Save to history safely
         save = table.copy()
         save["Date"] = today
         save["Sport"] = sport
@@ -124,7 +113,7 @@ for i,sport in enumerate(SPORTS):
         save["Units"] = 0
         if "Probability" not in save.columns:
             save["Probability"] = 0.5
-        history = pd.concat([history,save[["Date","Sport","Home","Away","BetOn","Probability","Result","Units"]]],ignore_index=True)
+        history = pd.concat([history, save[["Date","Sport","Home","Away","BetOn","Probability","Result","Units"]]],ignore_index=True)
         history.to_csv(HISTORY_FILE,index=False)
         all_bets.append(table.assign(Sport=sport))
 
