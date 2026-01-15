@@ -50,8 +50,6 @@ def fetch_odds(sport_key, primary_market):
                 continue
 
             data = r.json()
-            st.write("Market tried:", m)                # <-- debug line
-            st.write("Number of games returned:", len(data))  # <-- debug line
             if not data:
                 continue
 
@@ -77,13 +75,11 @@ def fetch_odds(sport_key, primary_market):
                     continue
 
             if rows:
-                st.write(f"Using market: {m}")
                 return pd.DataFrame(rows)
 
         except:
             continue
 
-    st.write("No games available in any market")
     return pd.DataFrame()
 
 # ------------------ ELO SYSTEM ------------------ #
