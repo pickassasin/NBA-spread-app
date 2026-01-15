@@ -1,28 +1,33 @@
 import streamlit as st
 import requests
 import pandas as pd
-import numpy as np
 import os
 from sklearn.ensemble import RandomForestClassifier
 
 # ======================
 # CONFIG
 # ======================
+st.set_page_config(page_title="NBA & NHL Betting Edge", layout="wide")
+
 API_KEY = st.secrets["ODDS_API_KEY"]
 
 NBA_CSV = "nba_bet_results.csv"
 NHL_CSV = "nhl_bet_results.csv"
 
-st.set_page_config(page_title="NBA & NHL Betting Edge", layout="wide")
-
 # ======================
 # HELPERS
 # ======================
 def odds_to_prob(odds):
-    return 100 / (odds + 100) if odds > 0 else abs(odds) / (abs(odds) + 100)
+    try:
+        return 100 / (odds + 100) if odds > 0 else abs(odds) / (abs(odds) + 100)
+    except:
+        return 0.5
 
 def prob_to_odds(p):
-    return int(-100 * p / (1 - p)) if p > 0.5 else int(100 * (1 - p) / p)
+    try:
+        return int(-100 * p / (1 - p)) if p > 0.5 else int(100 * (1 - p) / p)
+    except:
+        return 0
 
 def edge_confidence(edge):
     if edge >= 6:
@@ -31,122 +36,152 @@ def edge_confidence(edge):
         return "MEDIUM"
     return "LOW"
 
+def safe_request(url, params):
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            return []
+        return r.json()
+    except:
+        return []
+
 # ======================
 # SIDEBAR
 # ======================
 screen = st.sidebar.radio("Select Sport", ["NBA", "NHL"])
+st.title(f"{screen} Betting Edge Finder")
 
 # ======================
-# NBA LOGIC
+# NBA
 # ======================
 def fetch_nba_odds():
-    url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+    url = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
     params = {
         "apiKey": API_KEY,
+        "regions": "us",
         "markets": "spreads",
         "oddsFormat": "american"
     }
-    r = requests.get(url, params=params)
-    r.raise_for_status()
-    data = r.json()
 
+    data = safe_request(url, params)
     games = []
+
     for g in data:
-        bm = g["bookmakers"][0]
-        market = bm["markets"][0]["outcomes"][0]
-        games.append({
-            "Home Team": g["home_team"],
-            "Away Team": g["away_team"],
-            "Book Odds": market["price"]
-        })
+        try:
+            bm = g["bookmakers"][0]
+            market = bm["markets"][0]["outcomes"][0]
+            games.append({
+                "Home Team": g["home_team"],
+                "Away Team": g["away_team"],
+                "Book Odds": market["price"]
+            })
+        except:
+            continue
+
     return pd.DataFrame(games)
 
 def nba_model(df):
+    if df.empty:
+        return df.assign(Model_Prob=0.52)
+
     if not os.path.exists(NBA_CSV):
-        df["Model Prob"] = 0.52
-        return df
+        return df.assign(Model_Prob=0.52)
 
     hist = pd.read_csv(NBA_CSV)
-    if hist.empty:
-        df["Model Prob"] = 0.52
-        return df
+    if hist.empty or "Result" not in hist.columns:
+        return df.assign(Model_Prob=0.52)
 
-    X = hist[["Book Odds"]]
-    y = hist["Result"]
-    model = RandomForestClassifier()
-    model.fit(X, y)
+    try:
+        X = hist[["Book Odds"]]
+        y = hist["Result"]
+        model = RandomForestClassifier()
+        model.fit(X, y)
+        df["Model_Prob"] = model.predict_proba(df[["Book Odds"]])[:, 1]
+    except:
+        df["Model_Prob"] = 0.52
 
-    df["Model Prob"] = model.predict_proba(df[["Book Odds"]])[:, 1]
     return df
 
 # ======================
-# NHL LOGIC
+# NHL
 # ======================
 def fetch_nhl_odds():
-    url = f"https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds"
+    url = "https://api.the-odds-api.com/v4/sports/icehockey_nhl/odds"
     params = {
         "apiKey": API_KEY,
+        "regions": "us",
         "markets": "h2h",
         "oddsFormat": "american"
     }
-    r = requests.get(url, params=params)
-    r.raise_for_status()
-    data = r.json()
 
+    data = safe_request(url, params)
     games = []
+
     for g in data:
-        bm = g["bookmakers"][0]
-        home = g["home_team"]
-        for o in bm["markets"][0]["outcomes"]:
-            if o["name"] == home:
-                games.append({
-                    "Home Team": home,
-                    "Away Team": g["away_team"],
-                    "Book Odds": o["price"]
-                })
+        try:
+            bm = g["bookmakers"][0]
+            home = g["home_team"]
+            for o in bm["markets"][0]["outcomes"]:
+                if o["name"] == home:
+                    games.append({
+                        "Home Team": home,
+                        "Away Team": g["away_team"],
+                        "Book Odds": o["price"]
+                    })
+        except:
+            continue
+
     return pd.DataFrame(games)
 
 def nhl_model(df):
+    if df.empty:
+        return df.assign(Model_Prob=0.51)
+
     if not os.path.exists(NHL_CSV):
-        df["Model Prob"] = 0.51
-        return df
+        return df.assign(Model_Prob=0.51)
 
     hist = pd.read_csv(NHL_CSV)
-    if hist.empty:
-        df["Model Prob"] = 0.51
-        return df
+    if hist.empty or "Result" not in hist.columns:
+        return df.assign(Model_Prob=0.51)
 
-    X = hist[["Book Odds"]]
-    y = hist["Result"]
-    model = RandomForestClassifier()
-    model.fit(X, y)
+    try:
+        X = hist[["Book Odds"]]
+        y = hist["Result"]
+        model = RandomForestClassifier()
+        model.fit(X, y)
+        df["Model_Prob"] = model.predict_proba(df[["Book Odds"]])[:, 1]
+    except:
+        df["Model_Prob"] = 0.51
 
-    df["Model Prob"] = model.predict_proba(df[["Book Odds"]])[:, 1]
     return df
 
 # ======================
-# UI
+# RUN
 # ======================
-st.title(f"{screen} Betting Edge Finder")
-
 if screen == "NBA":
     df = fetch_nba_odds()
     df = nba_model(df)
-
-elif screen == "NHL":
+else:
     df = fetch_nhl_odds()
     df = nhl_model(df)
 
+if df.empty:
+    st.info("No games currently available.")
+    st.stop()
+
 df["Book Prob"] = df["Book Odds"].apply(odds_to_prob)
-df["Edge %"] = (df["Model Prob"] - df["Book Prob"]) * 100
-df["Fair Odds"] = df["Model Prob"].apply(prob_to_odds)
+df["Edge %"] = (df["Model_Prob"] - df["Book Prob"]) * 100
+df["Fair Odds"] = df["Model_Prob"].apply(prob_to_odds)
 df["Confidence"] = df["Edge %"].apply(edge_confidence)
 
 st.dataframe(
     df[[
-        "Home Team", "Away Team",
-        "Book Odds", "Fair Odds",
-        "Edge %", "Confidence"
+        "Home Team",
+        "Away Team",
+        "Book Odds",
+        "Fair Odds",
+        "Edge %",
+        "Confidence"
     ]].sort_values("Edge %", ascending=False),
     use_container_width=True
 )
