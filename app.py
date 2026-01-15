@@ -132,12 +132,6 @@ def grade_bets(history):
     history.to_csv(HISTORY_FILE,index=False)
     return history
 
-# ---------------- FALLBACK UPCOMING TEAMS ---------------- #
-# Replace with your own logic to get scheduled matchups if no odds yet
-def get_upcoming_teams(sport):
-    # For demo purposes, returns an empty list if API has nothing
-    return []
-
 # ---------------- APP ---------------- #
 init_history()
 history = pd.read_csv(HISTORY_FILE)
@@ -151,19 +145,36 @@ for i,sport in enumerate(["NBA","NFL","NHL"]):
         model = load_or_train(sport, history, SPORTS[sport]["model"])
         elo = build_elo(history[history["Sport"]==sport])
 
+        # ---------- Fallback if no odds ----------
         if odds.empty:
             st.info("No live odds yet. Using Elo-only predictions.")
-            teams = get_upcoming_teams(sport)
+            # Try to get matchups from API h2h if available
+            try:
+                r = requests.get(
+                    f"https://api.the-odds-api.com/v4/sports/{SPORTS[sport]['key']}/odds",
+                    params={"apiKey": API_KEY, "regions":"us","markets":"h2h,totals","oddsFormat":"american"},
+                    timeout=10
+                )
+                data = r.json()
+                teams=[]
+                for g in data:
+                    teams.append((g["home_team"], g["away_team"]))
+            except:
+                teams=[]
             if teams:
                 table = pd.DataFrame({
                     "Home": [t[0] for t in teams],
                     "Away": [t[1] for t in teams],
                     "EloDiff": [elo.get(t[0],1500)-elo.get(t[1],1500) for t in teams]
                 })
-                table["Probability %"] = 50 + 0.05*table["EloDiff"]
+                table["Probability %"] = 50 + 0.05*table["EloDiff"]  # Elo-based probability
+                table["BetOn"] = np.where(table["Probability %"]>=50, table["Home"], table["Away"])
                 st.dataframe(table,use_container_width=True)
+            else:
+                st.warning("No games found yet.")
             continue
 
+        # ---------- Normal odds processing ----------
         odds["EloDiff"] = odds["Home"].map(elo).fillna(1500) - odds["Away"].map(elo).fillna(1500)
         odds["MarketProb"] = odds["Odds"].apply(odds_to_prob)
         if model:
