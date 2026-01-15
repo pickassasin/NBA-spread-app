@@ -39,8 +39,10 @@ def fetch_odds(sport_key):
             timeout=10
         )
         if r.status_code != 200:
+            st.warning(f"API returned status {r.status_code} for {sport_key}")
             return pd.DataFrame()
         data = r.json()
+        st.write(f"API returned {len(data)} games for {sport_key}")  # debug/log
         rows = []
         for g in data:
             try:
@@ -64,8 +66,11 @@ def fetch_odds(sport_key):
                         break
             except:
                 continue
+        if not rows:
+            st.info("No live odds yet — the API hasn’t posted them.")
         return pd.DataFrame(rows)
-    except:
+    except Exception as e:
+        st.error(f"Error fetching odds: {e}")
         return pd.DataFrame()
 
 # ---------------- ELO ---------------- #
@@ -140,7 +145,6 @@ for i,sport in enumerate(["NBA","NFL","NHL"]):
     with tabs[i]:
         odds = fetch_odds(SPORTS[sport]["key"])
         if odds.empty:
-            st.info("No games available")
             continue
         model = load_or_train(sport, history, SPORTS[sport]["model"])
         elo = build_elo(history[history["Sport"]==sport])
