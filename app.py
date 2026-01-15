@@ -1,29 +1,49 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import requests
 import os
 from datetime import datetime
-from sklearn.linear_model import LogisticRegression
 
-st.set_page_config(page_title="Daily Sports Predictor", layout="wide")
+st.set_page_config(page_title="Sports Betting Model", layout="wide")
 
-# ---------------- CONFIG ---------------- #
+API_KEY = st.secrets["ODDS_API_KEY"]
 HISTORY_FILE = "bet_history.csv"
-SPORTS = ["NBA","NFL","NHL"]
 
-# ---------------- UTILITIES ---------------- #
-def init_history():
-    if not os.path.exists(HISTORY_FILE):
-        pd.DataFrame(columns=[
-            "Date","Sport","Home","Away","BetOn","Probability","Result","Units"
-        ]).to_csv(HISTORY_FILE,index=False)
+SPORTS = {
+    "NBA": {
+        "key": "basketball_nba",
+        "market": "spreads",
+        "type": "probability"
+    },
+    "NFL": {
+        "key": "americanfootball_nfl",
+        "market": "spreads",
+        "type": "probability"
+    },
+    "NHL": {
+        "key": "icehockey_nhl",
+        "market": "h2h",
+        "type": "edge"
+    }
+}
 
-def build_elo(history, base=1500, k=20):
+# ---------------- INIT ----------------
+if not os.path.exists(HISTORY_FILE):
+    pd.DataFrame(columns=[
+        "Date","Sport","Home","Away","BetOn",
+        "Odds","Probability","Result","Units"
+    ]).to_csv(HISTORY_FILE,index=False)
+
+history = pd.read_csv(HISTORY_FILE)
+
+# ---------------- ELO ----------------
+def build_elo(hist, base=1500, k=20):
     elo = {}
-    for _, r in history.iterrows():
+    for _, r in hist.iterrows():
         if r["Result"] not in ["WIN","LOSS"]:
             continue
-        h, a = r["Home"], r["Away"]
+        h,a = r["Home"], r["Away"]
         elo.setdefault(h, base)
         elo.setdefault(a, base)
         expected = 1/(1+10**((elo[a]-elo[h])/400))
@@ -32,109 +52,100 @@ def build_elo(history, base=1500, k=20):
         elo[a] -= k*(score-expected)
     return elo
 
-# ---------------- DAILY SCHEDULES ---------------- #
-# Replace with live API later
-DAILY_GAMES = {
-    "NBA":[
-        ("Memphis Grizzlies","Orlando Magic"),
-        ("Detroit Pistons","Phoenix Suns"),
-        ("San Antonio Spurs","Milwaukee Bucks"),
-        ("Miami Heat","Boston Celtics"),
-        ("Golden State Warriors","New York Knicks")
-    ],
-    "NHL":[
-        ("San Jose Sharks","Washington Capitals"),
-        ("Minnesota Wild","Winnipeg Jets")
-    ],
-    "NFL":[
-        ("Kansas City Chiefs","Buffalo Bills"),
-        ("Green Bay Packers","Chicago Bears")
-    ]
-}
+elo = build_elo(history)
 
-# ---------------- MODEL ---------------- #
-def train_model(sport, history):
-    df = history[history["Sport"]==sport]
-    df = df[df["Result"].isin(["WIN","LOSS"])]
-    elo = build_elo(history)
-    if len(df)<10:
-        return None, elo
-    df["EloDiff"] = df["Home"].map(elo).fillna(1500)-df["Away"].map(elo).fillna(1500)
-    df["Target"] = (df["Result"]=="WIN").astype(int)
-    X = df[["EloDiff"]]
-    y = df["Target"]
-    model = LogisticRegression()
-    model.fit(X,y)
-    return model, elo
+# ---------------- FETCH ODDS ----------------
+def fetch_games(sport):
+    url = "https://api.the-odds-api.com/v4/sports/{}/odds".format(sport["key"])
+    params = {
+        "apiKey": API_KEY,
+        "markets": sport["market"],
+        "oddsFormat": "american",
+        "regions": "us"
+    }
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
 
-# ---------------- APP ---------------- #
-init_history()
-history = pd.read_csv(HISTORY_FILE)
-tabs = st.tabs(["NBA","NFL","NHL","🔥 Best Bets","📊 Performance"])
-all_bets=[]
-
+# ---------------- UI ----------------
+tabs = st.tabs(["NBA","NFL","NHL","📊 Performance","🔥 Best Bets"])
 today = datetime.utcnow().date().isoformat()
+all_bets = []
 
-for i,sport in enumerate(SPORTS):
+for i,(sport_name, sport) in enumerate(SPORTS.items()):
     with tabs[i]:
-        games = DAILY_GAMES.get(sport,[])
-        if not games:
-            st.info("No games today.")
+        try:
+            games = fetch_games(sport)
+        except:
+            st.error("Failed to load odds.")
             continue
 
-        model, elo = train_model(sport, history)
+        if not games:
+            st.info("No games with odds available yet.")
+            continue
 
-        table = pd.DataFrame({
-            "Home":[g[0] for g in games],
-            "Away":[g[1] for g in games]
-        })
-        table["EloDiff"] = table["Home"].map(elo).fillna(1500)-table["Away"].map(elo).fillna(1500)
+        rows = []
+        for g in games:
+            if not g["bookmakers"]:
+                continue
+            market = g["bookmakers"][0]["markets"][0]
+            outcomes = market["outcomes"]
+            home = g["home_team"]
+            away = g["away_team"]
 
-        # Predict probabilities for NBA/NFL, clamp 0-1
-        if sport in ["NBA","NFL"]:
-            if model:
-                table["Probability"] = model.predict_proba(table[["EloDiff"]])[:,1]
+            elo.setdefault(home,1500)
+            elo.setdefault(away,1500)
+            elo_diff = elo[home]-elo[away]
+            prob = np.clip(1/(1+np.exp(-elo_diff/200)),0,1)
+
+            if sport["type"]=="edge":
+                odds_home = next(o["price"] for o in outcomes if o["name"]==home)
+                implied = abs(odds_home)/(abs(odds_home)+100) if odds_home<0 else 100/(odds_home+100)
+                edge = (prob-implied)*100
+                bet_on = home if edge>0 else away
+                rows.append([home,away,bet_on,odds_home,prob,edge])
             else:
-                table["Probability"] = np.clip(0.5 + 0.05*table["EloDiff"],0,1)
-        else:  # NHL uses edge %
-            table["Probability"] = np.clip(0.5 + 0.05*table["EloDiff"],0,1)
-            table["Edge %"] = (table["Probability"]-0.5)*200
+                bet_on = home if prob>=0.5 else away
+                rows.append([home,away,bet_on,None,prob,None])
 
-        # Determine picks
-        if sport=="NHL":
-            table["BetOn"] = np.where(table["Edge %"]>0, table["Home"], table["Away"])
-        else:
-            table["BetOn"] = np.where(table["Probability"]>=0.5, table["Home"], table["Away"])
+        df = pd.DataFrame(rows,columns=[
+            "Home","Away","BetOn","Odds","Probability","Edge %"
+        ])
 
-        st.dataframe(table,use_container_width=True)
+        st.dataframe(df,use_container_width=True)
 
-        # Save to history safely
-        save = table.copy()
+        save = df.copy()
         save["Date"] = today
-        save["Sport"] = sport
+        save["Sport"] = sport_name
         save["Result"] = "PENDING"
         save["Units"] = 0
-        if "Probability" not in save.columns:
-            save["Probability"] = 0.5
-        history = pd.concat([history, save[["Date","Sport","Home","Away","BetOn","Probability","Result","Units"]]],ignore_index=True)
+
+        history = pd.concat([
+            history,
+            save[history.columns]
+        ],ignore_index=True)
+
         history.to_csv(HISTORY_FILE,index=False)
-        all_bets.append(table.assign(Sport=sport))
+        all_bets.append(df.assign(Sport=sport_name))
 
-# ---------------- BEST BETS ---------------- #
+# ---------------- PERFORMANCE ----------------
 with tabs[3]:
-    if all_bets:
-        best = pd.concat(all_bets,ignore_index=True)
-        st.dataframe(best.sort_values(by="Probability",ascending=False),use_container_width=True)
-
-# ---------------- PERFORMANCE ---------------- #
-with tabs[4]:
-    for sport in SPORTS:
-        df = history[history["Sport"]==sport]
+    for s in SPORTS:
+        df = history[history["Sport"]==s]
         wins = (df["Result"]=="WIN").sum()
         losses = (df["Result"]=="LOSS").sum()
         units = df["Units"].sum()
         roi = (units/max(len(df),1))*100
-        st.subheader(sport)
-        st.metric("Record",f"{wins}-{losses}")
-        st.metric("ROI %",f"{roi:.1f}%")
-        st.metric("Units",f"{units:.1f}")
+        st.subheader(s)
+        st.write(f"Record: {wins}-{losses}")
+        st.write(f"ROI: {roi:.2f}%")
+        st.write(f"Units: {units:.2f}")
+
+# ---------------- BEST BETS ----------------
+with tabs[4]:
+    if all_bets:
+        best = pd.concat(all_bets)
+        if "Edge %" in best.columns:
+            st.dataframe(best.sort_values(by=["Edge %","Probability"],ascending=False))
+        else:
+            st.dataframe(best.sort_values(by="Probability",ascending=False))
