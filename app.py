@@ -32,7 +32,6 @@ def init_history():
 
 # ------------------ FETCH ODDS WITH MULTI-MARKET FALLBACK ------------------ #
 def fetch_odds(sport_key, primary_market):
-    # Try multiple markets in order: primary, h2h, totals
     markets = [primary_market, "h2h", "totals"] if primary_market != "h2h" else ["h2h", "totals"]
 
     for m in markets:
@@ -51,6 +50,8 @@ def fetch_odds(sport_key, primary_market):
                 continue
 
             data = r.json()
+            st.write("Market tried:", m)                # <-- debug line
+            st.write("Number of games returned:", len(data))  # <-- debug line
             if not data:
                 continue
 
