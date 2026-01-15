@@ -77,6 +77,25 @@ def log_bets(df, sport, path):
     )
     merged.to_csv(path, index=False)
 
+def calculate_stats(path):
+    if not os.path.exists(path):
+        return 0,0
+    df = pd.read_csv(path)
+    df = df[df["Result"].isin(["WIN","LOSS"])]
+    if df.empty:
+        return 0,0
+    wins = (df["Result"]=="WIN").sum()
+    total = len(df)
+    roi = 0
+    def profit(row):
+        if row["Result"]=="WIN":
+            odds = row["Book Odds"]
+            return (odds/100) if odds>0 else (100/abs(odds))
+        return -1
+    df["Profit"] = df.apply(profit, axis=1)
+    roi = (df["Profit"].sum()/total)*100
+    return wins, roi
+
 # ======================
 # SIDEBAR
 # ======================
@@ -110,7 +129,7 @@ def fetch_odds(sport_key, market):
             elif market == "h2h":  # NHL moneyline
                 home = g["home_team"]
                 outcomes = bm["markets"][0]["outcomes"]
-                outcome = next((o for o in outcomes if o["name"] == home), None)
+                outcome = next((o for o in outcomes if o["name"]==home), None)
                 if outcome is None:
                     continue
             games.append({
@@ -120,7 +139,6 @@ def fetch_odds(sport_key, market):
             })
         except:
             continue
-
     return pd.DataFrame(games)
 
 def run_model(df, log_path):
@@ -140,7 +158,7 @@ def run_model(df, log_path):
 
     try:
         X = hist[["Book Odds"]]
-        y = (hist["Result"] == "WIN").astype(int)
+        y = (hist["Result"]=="WIN").astype(int)
         model = RandomForestClassifier()
         model.fit(X, y)
         df["Model_Prob"] = model.predict_proba(df[["Book Odds"]])[:,1]
@@ -152,19 +170,17 @@ def run_model(df, log_path):
 # ======================
 # RUN APP LOGIC
 # ======================
-if screen == "NBA":
+if screen=="NBA":
     df = fetch_odds("basketball_nba","spreads")
-    df = run_model(df, NBA_LOG)
+    df = run_model(df,NBA_LOG)
     LOG_PATH = NBA_LOG
-
-elif screen == "NFL":
+elif screen=="NFL":
     df = fetch_odds("americanfootball_nfl","spreads")
-    df = run_model(df, NFL_LOG)
+    df = run_model(df,NFL_LOG)
     LOG_PATH = NFL_LOG
-
 else:  # NHL
     df = fetch_odds("icehockey_nhl","h2h")
-    df = run_model(df, NHL_LOG)
+    df = run_model(df,NHL_LOG)
     LOG_PATH = NHL_LOG
 
 if df.empty:
@@ -175,7 +191,7 @@ if df.empty:
 # CALCULATE EDGE & BET
 # ======================
 df["Book Prob"] = df["Book Odds"].apply(odds_to_prob)
-df["Edge %"] = (df["Model_Prob"] - df["Book Prob"]) * 100
+df["Edge %"] = (df["Model_Prob"]-df["Book Prob"])*100
 df["Fair Odds"] = df["Model_Prob"].apply(prob_to_odds)
 df["Confidence"] = df["Edge %"].apply(edge_confidence)
 df["Bet On"] = df.apply(pick_team, axis=1)
@@ -184,35 +200,31 @@ df["Abs Edge %"] = df["Edge %"].abs()
 # ======================
 # HIGH EDGE ALERTS
 # ======================
-high_edge = df[df["Abs Edge %"] >= HIGH_EDGE_THRESHOLD]
+high_edge = df[df["Abs Edge %"]>=HIGH_EDGE_THRESHOLD]
 if not high_edge.empty:
-    st.toast("🔥 HIGH EDGE BETS AVAILABLE", icon="🔥")
+    st.toast("🔥 HIGH EDGE BETS AVAILABLE",icon="🔥")
     st.warning(f"{len(high_edge)} high-edge opportunities detected.")
 
 # ======================
 # LOG BETS
 # ======================
-log_bets(
-    df[[
-        "Home Team","Away Team","Bet On",
-        "Book Odds","Fair Odds","Edge %"
-    ]],
-    screen,
-    LOG_PATH
-)
+log_bets(df[["Home Team","Away Team","Bet On","Book Odds","Fair Odds","Edge %"]],screen,LOG_PATH)
 
 # ======================
 # DISPLAY DATAFRAME
 # ======================
 st.dataframe(
     df[[
-        "Bet On",
-        "Home Team",
-        "Away Team",
-        "Book Odds",
-        "Fair Odds",
-        "Abs Edge %",
-        "Confidence"
-    ]].sort_values("Abs Edge %", ascending=False),
+        "Bet On","Home Team","Away Team",
+        "Book Odds","Fair Odds","Abs Edge %","Confidence"
+    ]].sort_values("Abs Edge %",ascending=False),
     use_container_width=True
 )
+
+# ======================
+# SHOW RECORD & ROI
+# ======================
+wins, roi = calculate_stats(LOG_PATH)
+total_bets = len(pd.read_csv(LOG_PATH)[pd.read_csv(LOG_PATH)["Result"].isin(["WIN","LOSS"])])
+st.subheader(f"{screen} Historical Stats")
+st.write(f"Record: {wins} wins / {total_bets-wins} losses | ROI: {roi:.2f}%")
