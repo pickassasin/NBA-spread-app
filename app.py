@@ -46,16 +46,31 @@ def load_history():
 def save_history(df):
     df.to_csv(HISTORY_FILE, index=False)
 
-# ---------------- TEAM STATS PLACEHOLDER ----------------
-# Replace with real stats or API in future; for now we mock with random for demo
-def get_team_elo(team):
-    return np.random.randint(1300, 1800)  # Elo rating
+# ---------------- TEAM STATS ----------------
+def calculate_team_elo(history, team):
+    """Simple Elo: start 1500, +20 for win, -20 for loss"""
+    h = history[(history["Pick"]==team) | (history["Game"].str.contains(team))]
+    elo = 1500
+    for _, row in h.iterrows():
+        if row["Result"]=="Win" and row["Pick"]==team:
+            elo += 20
+        elif row["Result"]=="Loss" and row["Pick"]==team:
+            elo -= 20
+    return elo
 
-def get_recent_form(team):
-    return np.random.rand()  # 0 to 1
+def get_recent_form(history, team, sport):
+    h = history[(history["Sport"]==sport) & ((history["Pick"]==team) | (history["Game"].str.contains(team)))]
+    last5 = h.tail(5)
+    if len(last5)==0:
+        return 0.5
+    return (last5["Result"]=="Win").mean()
 
-def get_rest_days(team):
-    return np.random.randint(0, 5)
+def get_rest_days(history, team):
+    h = history[(history["Pick"]==team) | (history["Game"].str.contains(team))]
+    if len(h)==0:
+        return 2
+    last_date = pd.to_datetime(h["Date"].iloc[-1])
+    return (datetime.now() - last_date).days
 
 # ---------------- MODEL ----------------
 def train_model(history, sport):
@@ -63,8 +78,8 @@ def train_model(history, sport):
     if len(data) < 25:
         return None
 
-    X = data[["Odds"]]  # Placeholder; future: include all stats
-    y = (data["Result"] == "Win").astype(int)
+    X = data[["Odds"]]  # keep simple; can expand later with Elo/form
+    y = (data["Result"]=="Win").astype(int)
 
     model = LogisticRegression()
     model.fit(X, y)
@@ -104,43 +119,39 @@ def build_games(sport, config, model, history):
 
         market_prob = american_to_prob(odds)
 
-        # ---------------- NEW MODEL LOGIC ----------------
-        # Stats
-        home_adv = 1 if pick == home else 0
-        team_elo = get_team_elo(pick)
-        opp_elo = get_team_elo(away if pick==home else home)
-        recent_form = get_recent_form(pick)
-        rest_days = get_rest_days(pick)
+        # ---------------- CALCULATE REAL STATS ----------------
+        home_adv = 1 if pick==home else 0
+        team_elo = calculate_team_elo(history, pick)
+        opp_elo = calculate_team_elo(history, away if pick==home else home)
+        recent_form = get_recent_form(history, pick, sport)
+        rest_days = get_rest_days(history, pick)
         spread_power = spread_strength(odds)
 
-        # NBA probability
-        if config["mode"] == "prob":
+        # ---------------- MODEL LOGIC ----------------
+        if config["mode"]=="prob":  # NBA probability
             if model:
                 X_input = [[market_prob, spread_power, home_adv, team_elo, opp_elo, recent_form, rest_days]]
                 model_adjustment = model.predict_proba(X_input)[0][1]
-                final_prob = (market_prob * 0.6) + (model_adjustment * 0.4)
+                final_prob = (market_prob*0.6) + (model_adjustment*0.4)
             else:
                 final_prob = market_prob
             prob = final_prob
             edge = None
-
-        # NHL edge %
-        elif config["mode"] == "edge":
+        elif config["mode"]=="edge":  # NHL edge
             if model:
                 X_input = [[market_prob, home_adv, team_elo, opp_elo, recent_form]]
                 model_prob = model.predict_proba(X_input)[0][1]
                 edge = (model_prob - market_prob) * 100
             else:
-                edge = (market_prob - 0.5) * 100
+                edge = (market_prob - 0.5)*100
             prob = None
-        # -------------------------------------------------
 
         games.append({
             "Sport": sport,
             "Game": f"{away} @ {home}",
             "Pick": pick,
             "Odds": odds,
-            "Probability": prob * 100 if prob else None,
+            "Probability": prob*100 if prob else None,
             "Edge": edge
         })
 
@@ -171,7 +182,7 @@ for sport, config in SPORTS.items():
                 st.dataframe(df, use_container_width=True)
 
         except Exception as e:
-            st.error("Failed to load odds.")
+            st.error(f"Failed to load odds: {e}")
 
 # ---------------- BEST BETS ----------------
 with tabs[2]:
@@ -191,13 +202,13 @@ with tabs[2]:
             st.markdown(f"### {row['Game']}")
             st.markdown(f"**Pick:** {row['Pick']} | **Odds:** {row['Odds']}")
 
-            if row["Sport"] == "NBA":
+            if row["Sport"]=="NBA":
                 st.markdown(f"**Probability:** {row['Probability']:.1f}%")
-                st.progress(min(row["Probability"]/100, 1))
+                st.progress(min(row["Probability"]/100,1))
 
-            if row["Sport"] == "NHL":
+            if row["Sport"]=="NHL":
                 st.markdown(f"**Edge:** {row['Edge']:.1f}%")
-                st.progress(min(abs(row["Edge"])/15, 1))
+                st.progress(min(abs(row["Edge"])/15,1))
 
             st.divider()
 
@@ -209,9 +220,9 @@ with tabs[3]:
         st.info("No tracked bets yet.")
     else:
         for sport in history["Sport"].unique():
-            h = history[history["Sport"] == sport]
-            wins = (h["Result"] == "Win").sum()
-            losses = (h["Result"] == "Loss").sum()
+            h = history[history["Sport"]==sport]
+            wins = (h["Result"]=="Win").sum()
+            losses = (h["Result"]=="Loss").sum()
             roi = h["Units"].sum()
 
             st.subheader(sport)
