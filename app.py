@@ -31,39 +31,58 @@ def init_history():
         ]).to_csv(HISTORY_FILE, index=False)
 
 def fetch_odds(sport_key, market):
-    try:
-        r = requests.get(
-            f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-            params={
-                "apiKey": API_KEY,
-                "regions": "us",
-                "markets": market,
-                "oddsFormat": "american"
-            },
-            timeout=10
-        )
-        if r.status_code != 200:
-            return pd.DataFrame()
-        data = r.json()
-    except:
-        return pd.DataFrame()
+    # Try primary market first, then fall back to moneyline
+    markets = [market, "h2h"] if market != "h2h" else ["h2h"]
 
-    rows = []
-    for g in data:
+    for m in markets:
         try:
-            book = g["bookmakers"][0]
-            market_data = book["markets"][0]["outcomes"]
-            home = g["home_team"]
-            away = g["away_team"]
-            home_odds = next(o["price"] for o in market_data if o["name"] == home)
+            r = requests.get(
+                f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
+                params={
+                    "apiKey": API_KEY,
+                    "regions": "us",
+                    "markets": m,
+                    "oddsFormat": "american"
+                },
+                timeout=10
+            )
 
-            rows.append({
-                "Home": home,
-                "Away": away,
-                "Odds": home_odds
-            })
+            if r.status_code != 200:
+                continue
+
+            data = r.json()
+            if not data:
+                continue
+
+            rows = []
+            for g in data:
+                try:
+                    book = g["bookmakers"][0]
+                    market_data = book["markets"][0]["outcomes"]
+                    home = g["home_team"]
+                    away = g["away_team"]
+
+                    home_odds = next(
+                        o["price"] for o in market_data if o["name"] == home
+                    )
+
+                    rows.append({
+                        "Home": home,
+                        "Away": away,
+                        "Odds": home_odds,
+                        "MarketUsed": m
+                    })
+                except:
+                    continue
+
+            if rows:
+                return pd.DataFrame(rows)
+
         except:
             continue
+
+    return pd.DataFrame()
+            
 
     return pd.DataFrame(rows)
 
