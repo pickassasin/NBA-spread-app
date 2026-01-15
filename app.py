@@ -66,8 +66,6 @@ def fetch_odds(sport_key):
                         break
             except:
                 continue
-        if not rows:
-            st.info("No live odds yet — the API hasn’t posted them.")
         return pd.DataFrame(rows)
     except Exception as e:
         st.error(f"Error fetching odds: {e}")
@@ -134,6 +132,12 @@ def grade_bets(history):
     history.to_csv(HISTORY_FILE,index=False)
     return history
 
+# ---------------- FALLBACK UPCOMING TEAMS ---------------- #
+# Replace with your own logic to get scheduled matchups if no odds yet
+def get_upcoming_teams(sport):
+    # For demo purposes, returns an empty list if API has nothing
+    return []
+
 # ---------------- APP ---------------- #
 init_history()
 history = pd.read_csv(HISTORY_FILE)
@@ -144,10 +148,22 @@ all_bets=[]
 for i,sport in enumerate(["NBA","NFL","NHL"]):
     with tabs[i]:
         odds = fetch_odds(SPORTS[sport]["key"])
-        if odds.empty:
-            continue
         model = load_or_train(sport, history, SPORTS[sport]["model"])
         elo = build_elo(history[history["Sport"]==sport])
+
+        if odds.empty:
+            st.info("No live odds yet. Using Elo-only predictions.")
+            teams = get_upcoming_teams(sport)
+            if teams:
+                table = pd.DataFrame({
+                    "Home": [t[0] for t in teams],
+                    "Away": [t[1] for t in teams],
+                    "EloDiff": [elo.get(t[0],1500)-elo.get(t[1],1500) for t in teams]
+                })
+                table["Probability %"] = 50 + 0.05*table["EloDiff"]
+                st.dataframe(table,use_container_width=True)
+            continue
+
         odds["EloDiff"] = odds["Home"].map(elo).fillna(1500) - odds["Away"].map(elo).fillna(1500)
         odds["MarketProb"] = odds["Odds"].apply(odds_to_prob)
         if model:
@@ -161,6 +177,7 @@ for i,sport in enumerate(["NBA","NFL","NHL"]):
             odds["Probability %"] = (odds["ModelProb"]*100).round(1)
             odds["BetOn"] = np.where(odds["ModelProb"]>=0.5, odds["Home"], odds["Away"])
         st.dataframe(odds,use_container_width=True)
+
         save=odds.copy()
         save["Date"]=datetime.utcnow().date().isoformat()
         save["Sport"]=sport
