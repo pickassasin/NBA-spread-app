@@ -4,7 +4,7 @@ import numpy as np
 import requests
 import os
 import joblib
-from datetime import datetime
+from datetime import datetime, timedelta
 from sklearn.linear_model import LogisticRegression
 
 st.set_page_config(page_title="Self-Learning Sports Model", layout="wide")
@@ -42,7 +42,6 @@ def fetch_odds(sport_key):
             st.warning(f"API returned status {r.status_code} for {sport_key}")
             return pd.DataFrame()
         data = r.json()
-        st.write(f"API returned {len(data)} games for {sport_key}")  # debug/log
         rows = []
         for g in data:
             try:
@@ -70,6 +69,29 @@ def fetch_odds(sport_key):
     except Exception as e:
         st.error(f"Error fetching odds: {e}")
         return pd.DataFrame()
+
+# ---------------- FETCH UPCOMING MATCHUPS ---------------- #
+def get_upcoming_teams(sport):
+    # Use schedule APIs or hardcoded fallback if schedule API fails
+    teams=[]
+    try:
+        today = datetime.utcnow().date()
+        if sport=="NBA":
+            # Example free API: balldontlie
+            r = requests.get(f"https://www.balldontlie.io/api/v1/games?start_date={today}&end_date={today}&per_page=100")
+            data=r.json()["data"]
+            for g in data:
+                teams.append((g["home_team"]["full_name"], g["visitor_team"]["full_name"]))
+        elif sport=="NFL":
+            # Free NFL schedules could be scraped or hardcoded
+            # Hardcoded example
+            teams=[("Patriots","Jets"),("Cowboys","Packers")]
+        elif sport=="NHL":
+            # Hardcoded example
+            teams=[("Bruins","Rangers"),("Canadiens","Maple Leafs")]
+    except:
+        pass
+    return teams
 
 # ---------------- ELO ---------------- #
 def build_elo(history, base=1500, k=20):
@@ -148,19 +170,7 @@ for i,sport in enumerate(["NBA","NFL","NHL"]):
         # ---------- Fallback if no odds ----------
         if odds.empty:
             st.info("No live odds yet. Using Elo-only predictions.")
-            # Try to get matchups from API h2h if available
-            try:
-                r = requests.get(
-                    f"https://api.the-odds-api.com/v4/sports/{SPORTS[sport]['key']}/odds",
-                    params={"apiKey": API_KEY, "regions":"us","markets":"h2h,totals","oddsFormat":"american"},
-                    timeout=10
-                )
-                data = r.json()
-                teams=[]
-                for g in data:
-                    teams.append((g["home_team"], g["away_team"]))
-            except:
-                teams=[]
+            teams = get_upcoming_teams(sport)
             if teams:
                 table = pd.DataFrame({
                     "Home": [t[0] for t in teams],
