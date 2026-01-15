@@ -30,56 +30,57 @@ def init_history():
             "Result","Units"
         ]).to_csv(HISTORY_FILE, index=False)
 
-# ------------------ FETCH ODDS WITH MULTI-MARKET FALLBACK ------------------ #
+# ------------------ ROBUST FETCH ODDS ------------------ #
 def fetch_odds(sport_key, primary_market):
-    markets = [primary_market, "h2h", "totals"] if primary_market != "h2h" else ["h2h", "totals"]
+    markets = [primary_market, "h2h", "totals"]
+    dates = [datetime.utcnow().date().isoformat()]  # today in UTC
+    rows = []
 
-    for m in markets:
-        try:
-            r = requests.get(
-                f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
-                params={
-                    "apiKey": API_KEY,
-                    "regions": "us",
-                    "markets": m,
-                    "oddsFormat": "american"
-                },
-                timeout=10
-            )
-            if r.status_code != 200:
-                continue
-
-            data = r.json()
-            if not data:
-                continue
-
-            rows = []
-            for g in data:
-                try:
-                    book = g["bookmakers"][0]
-                    market_data = book["markets"][0]["outcomes"]
-                    home = g["home_team"]
-                    away = g["away_team"]
-
-                    home_odds = next(
-                        o["price"] for o in market_data if o["name"] == home
-                    )
-
-                    rows.append({
-                        "Home": home,
-                        "Away": away,
-                        "Odds": home_odds,
-                        "MarketUsed": m
-                    })
-                except:
+    for date in dates:
+        for m in markets:
+            try:
+                r = requests.get(
+                    f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
+                    params={
+                        "apiKey": API_KEY,
+                        "regions": "us",
+                        "markets": m,
+                        "oddsFormat": "american",
+                        "date": date
+                    },
+                    timeout=10
+                )
+                if r.status_code != 200:
+                    continue
+                data = r.json()
+                if not data:
                     continue
 
-            if rows:
-                return pd.DataFrame(rows)
-
-        except:
-            continue
-
+                for g in data:
+                    try:
+                        for book in g["bookmakers"]:
+                            market_data = next((mk["outcomes"] for mk in book["markets"] if mk["key"]==m), None)
+                            if not market_data:
+                                continue
+                            home = g["home_team"]
+                            away = g["away_team"]
+                            home_odds = next((o["price"] for o in market_data if o["name"]==home), None)
+                            if home_odds is None:
+                                continue
+                            rows.append({
+                                "Home": home,
+                                "Away": away,
+                                "Odds": home_odds,
+                                "MarketUsed": m,
+                                "Bookmaker": book["title"]
+                            })
+                            break  # first bookmaker with valid odds
+                    except:
+                        continue
+                if rows:
+                    return pd.DataFrame(rows)
+            except:
+                continue
     return pd.DataFrame()
 
 # ------------------ ELO SYSTEM ------------------ #
