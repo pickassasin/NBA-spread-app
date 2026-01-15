@@ -45,11 +45,11 @@ def fetch_odds(sport_key):
         rows = []
         for g in data:
             try:
-                for book in g["bookmakers"]:
-                    for market in book["markets"]:
+                for book in g.get("bookmakers",[]):
+                    for market in book.get("markets",[]):
                         outcomes = market.get("outcomes",[])
-                        home = g["home_team"]
-                        away = g["away_team"]
+                        home = g.get("home_team")
+                        away = g.get("away_team")
                         home_odds = next((o["price"] for o in outcomes if o["name"]==home), None)
                         if home_odds is None:
                             continue
@@ -57,8 +57,8 @@ def fetch_odds(sport_key):
                             "Home": home,
                             "Away": away,
                             "Odds": home_odds,
-                            "MarketUsed": market["key"],
-                            "Bookmaker": book["title"]
+                            "MarketUsed": market.get("key"),
+                            "Bookmaker": book.get("title")
                         })
                         break
                     if rows:
@@ -76,16 +76,13 @@ def get_upcoming_teams(sport):
     today_str = "2026-01-15"
     try:
         if sport=="NBA":
-            # Fetch today’s NBA games from balldontlie.io
             r = requests.get(f"https://www.balldontlie.io/api/v1/games?start_date={today_str}&end_date={today_str}&per_page=100")
-            data = r.json()["data"]
+            data = r.json().get("data",[])
             for g in data:
                 teams.append((g["home_team"]["full_name"], g["visitor_team"]["full_name"]))
         elif sport=="NFL":
-            # No NFL games Jan 15, 2026
-            teams=[]
+            teams=[]  # No NFL games today
         elif sport=="NHL":
-            # Hardcoded verified NHL games for Jan 15, 2026
             teams=[("San Jose Sharks","Washington Capitals"),("Minnesota Wild","Winnipeg Jets")]
     except:
         pass
@@ -114,7 +111,7 @@ def train_model(sport, history, model_path):
         return None
     elo = build_elo(df)
     df["EloDiff"] = df["Home"].map(elo).fillna(1500) - df["Away"].map(elo).fillna(1500)
-    df["MarketProb"] = df["Odds"].apply(odds_to_prob)
+    df["MarketProb"] = df["Odds"].apply(lambda x: odds_to_prob(x) if not pd.isna(x) else 0.5)
     df["Target"] = (df["Result"]=="WIN").astype(int)
     X = df[["EloDiff","MarketProb"]]
     y = df["Target"]
@@ -159,10 +156,11 @@ for i,sport in enumerate(["NBA","NFL","NHL"]):
             st.info("No live odds yet. Using Elo-only predictions.")
             table["Probability %"] = 50 + 0.05*table["EloDiff"]
             table["BetOn"] = np.where(table["Probability %"]>=50, table["Home"], table["Away"])
+            table["Odds"] = np.nan
             st.dataframe(table,use_container_width=True)
         else:
             odds["EloDiff"] = odds["Home"].map(elo).fillna(1500) - odds["Away"].map(elo).fillna(1500)
-            odds["MarketProb"] = odds["Odds"].apply(odds_to_prob)
+            odds["MarketProb"] = odds["Odds"].apply(lambda x: odds_to_prob(x) if not pd.isna(x) else 0.5)
             if model:
                 odds["ModelProb"] = model.predict_proba(odds[["EloDiff","MarketProb"]])[:,1]
             else:
@@ -175,21 +173,28 @@ for i,sport in enumerate(["NBA","NFL","NHL"]):
                 odds["Probability %"] = (odds["ModelProb"]*100).round(1)
                 odds["BetOn"] = np.where(odds["ModelProb"]>=0.5, odds["Home"], odds["Away"])
 
+            # Ensure Odds column exists
+            if "Odds" not in odds.columns:
+                odds["Odds"] = np.nan
+
             st.dataframe(odds,use_container_width=True)
             table = odds.copy()
 
-        save=table.copy()
-        save["Date"]=datetime.utcnow().date().isoformat()
-        save["Sport"]=sport
-        save["Result"]="PENDING"
-        save["Units"]=0
-        history=pd.concat([history,save[["Date","Sport","Home","Away","BetOn","Odds","Result","Units"]]])
+        # Save to history safely
+        save = table.copy()
+        save["Date"] = datetime.utcnow().date().isoformat()
+        save["Sport"] = sport
+        save["Result"] = "PENDING"
+        save["Units"] = 0
+        if "Odds" not in save.columns:
+            save["Odds"] = np.nan
+        history = pd.concat([history, save[["Date","Sport","Home","Away","BetOn","Odds","Result","Units"]]], ignore_index=True)
         history.to_csv(HISTORY_FILE,index=False)
         all_bets.append(table.assign(Sport=sport))
 
 with tabs[3]:
     if all_bets:
-        st.dataframe(pd.concat(all_bets),use_container_width=True)
+        st.dataframe(pd.concat(all_bets, ignore_index=True),use_container_width=True)
 
 with tabs[4]:
     for sport in SPORTS:
