@@ -2,153 +2,181 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import os
 from datetime import datetime
+from sklearn.linear_model import LogisticRegression
 
-st.set_page_config(page_title="NBA & NHL Betting Model", layout="wide")
+# ---------------- CONFIG ----------------
+st.set_page_config(page_title="AI Sports Betting App", layout="wide")
 
 API_KEY = st.secrets["ODDS_API_KEY"]
-HISTORY_FILE = "bet_history.csv"
+HISTORY_FILE = "history.csv"
 
 SPORTS = {
     "NBA": {
-        "key": "basketball_nba",
+        "odds_key": "basketball_nba",
         "market": "spreads",
-        "type": "probability"
+        "mode": "prob"
     },
     "NHL": {
-        "key": "icehockey_nhl",
+        "odds_key": "icehockey_nhl",
         "market": "h2h",
-        "type": "edge"
+        "mode": "edge"
     }
 }
 
-# ---------------- INIT HISTORY ----------------
-if not os.path.exists(HISTORY_FILE):
-    pd.DataFrame(columns=[
-        "Date","Sport","Home","Away","BetOn",
-        "Odds","Probability","Result","Units"
-    ]).to_csv(HISTORY_FILE,index=False)
+# ---------------- UTILITIES ----------------
+def american_to_prob(odds):
+    if odds < 0:
+        return abs(odds) / (abs(odds) + 100)
+    return 100 / (odds + 100)
 
-history = pd.read_csv(HISTORY_FILE)
+def implied_prob(odds):
+    return american_to_prob(odds)
 
-# ---------------- ELO ----------------
-def build_elo(hist, base=1500, k=20):
-    elo = {}
-    for _, r in hist.iterrows():
-        if r["Result"] not in ["WIN","LOSS"]:
-            continue
-        h,a = r["Home"], r["Away"]
-        elo.setdefault(h, base)
-        elo.setdefault(a, base)
-        expected = 1/(1+10**((elo[a]-elo[h])/400))
-        score = 1 if r["BetOn"]==h else 0
-        elo[h] += k*(score-expected)
-        elo[a] -= k*(score-expected)
-    return elo
+def load_history():
+    try:
+        return pd.read_csv(HISTORY_FILE)
+    except:
+        return pd.DataFrame(columns=[
+            "Date","Sport","Game","Pick","Odds","Result","Units"
+        ])
 
-elo = build_elo(history)
+def save_history(df):
+    df.to_csv(HISTORY_FILE, index=False)
+
+# ---------------- MODEL ----------------
+def train_model(history, sport):
+    data = history[history["Sport"] == sport]
+    if len(data) < 25:
+        return None
+
+    X = data[["Odds"]]
+    y = (data["Result"] == "Win").astype(int)
+
+    model = LogisticRegression()
+    model.fit(X, y)
+    return model
 
 # ---------------- FETCH ODDS ----------------
-def fetch_games(sport):
-    url = f"https://api.the-odds-api.com/v4/sports/{sport['key']}/odds"
+def fetch_odds(sport_key, market):
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
     params = {
         "apiKey": API_KEY,
-        "markets": sport["market"],
         "regions": "us",
+        "markets": market,
         "oddsFormat": "american"
     }
-    r = requests.get(url, params=params, timeout=10)
+
+    r = requests.get(url, params=params)
     r.raise_for_status()
     return r.json()
 
+# ---------------- PROCESS GAMES ----------------
+def build_games(sport, config, model, history):
+    games = []
+    raw = fetch_odds(config["odds_key"], config["market"])
+
+    for g in raw:
+        home = g["home_team"]
+        away = g["away_team"]
+
+        book = g["bookmakers"][0]
+        market = book["markets"][0]
+
+        outcomes = market["outcomes"]
+        best = max(outcomes, key=lambda x: x["price"])
+
+        odds = best["price"]
+        pick = best["name"]
+
+        implied = implied_prob(odds)
+
+        if config["mode"] == "prob":
+            prob = model.predict_proba([[odds]])[0][1] if model else implied
+            edge = None
+        else:
+            prob = None
+            edge = (implied - 0.5) * 100
+
+        games.append({
+            "Sport": sport,
+            "Game": f"{away} @ {home}",
+            "Pick": pick,
+            "Odds": odds,
+            "Probability": prob * 100 if prob else None,
+            "Edge": edge
+        })
+
+    return pd.DataFrame(games)
+
 # ---------------- UI ----------------
-tabs = st.tabs(["NBA","NHL","📊 Performance","🔥 Best Bets"])
-today = datetime.utcnow().date().isoformat()
-all_bets = []
+st.title("📊 AI Sports Betting App")
 
-for i,(sport_name, sport) in enumerate(SPORTS.items()):
-    with tabs[i]:
+history = load_history()
+
+tabs = st.tabs(["NBA", "NHL", "Best Bets", "Performance"])
+
+all_games = []
+
+for sport, config in SPORTS.items():
+    with tabs[list(SPORTS.keys()).index(sport)]:
+        st.header(sport)
+
+        model = train_model(history, sport)
+
         try:
-            games = fetch_games(sport)
-        except Exception as e:
-            st.error(f"Failed to load odds: {e}")
-            continue
+            df = build_games(sport, config, model, history)
+            all_games.append(df)
 
-        if not games:
-            st.info("No games with odds available yet.")
-            continue
-
-        rows = []
-        for g in games:
-            if not g.get("bookmakers"):
-                continue
-
-            market = g["bookmakers"][0]["markets"][0]
-            outcomes = market["outcomes"]
-
-            home = g["home_team"]
-            away = g["away_team"]
-
-            elo.setdefault(home,1500)
-            elo.setdefault(away,1500)
-
-            elo_diff = elo[home] - elo[away]
-            prob = np.clip(1/(1+np.exp(-elo_diff/200)),0,1)
-
-            if sport["type"] == "edge":
-                odds_home = next(o["price"] for o in outcomes if o["name"]==home)
-                implied = abs(odds_home)/(abs(odds_home)+100) if odds_home<0 else 100/(odds_home+100)
-                edge = (prob - implied) * 100
-                bet_on = home if edge > 0 else away
-                rows.append([home,away,bet_on,odds_home,prob,edge])
+            if df.empty:
+                st.info("No games available yet.")
             else:
-                bet_on = home if prob >= 0.5 else away
-                rows.append([home,away,bet_on,None,prob,None])
+                st.dataframe(df, use_container_width=True)
 
-        df = pd.DataFrame(rows, columns=[
-            "Home","Away","BetOn","Odds","Probability","Edge %"
-        ])
-
-        if df.empty:
-            st.info("No valid markets yet.")
-            continue
-
-        st.dataframe(df, use_container_width=True)
-
-        save = df.copy()
-        save["Date"] = today
-        save["Sport"] = sport_name
-        save["Result"] = "PENDING"
-        save["Units"] = 0
-
-        history = pd.concat([
-            history,
-            save[history.columns]
-        ], ignore_index=True)
-
-        history.to_csv(HISTORY_FILE, index=False)
-        all_bets.append(df.assign(Sport=sport_name))
-
-# ---------------- PERFORMANCE ----------------
-with tabs[2]:
-    for s in SPORTS:
-        df = history[history["Sport"]==s]
-        wins = (df["Result"]=="WIN").sum()
-        losses = (df["Result"]=="LOSS").sum()
-        units = df["Units"].sum()
-        roi = (units / max(len(df),1)) * 100
-
-        st.subheader(s)
-        st.write(f"Record: {wins}-{losses}")
-        st.write(f"ROI: {roi:.2f}%")
-        st.write(f"Units: {units:.2f}")
+        except Exception as e:
+            st.error("Failed to load odds.")
 
 # ---------------- BEST BETS ----------------
+with tabs[2]:
+    st.header("🔥 Best Bets")
+
+    if all_games:
+        bets = pd.concat(all_games)
+    else:
+        bets = pd.DataFrame()
+
+    if bets.empty:
+        st.info("No best bets right now.")
+    else:
+        best = bets.copy()
+
+        for _, row in best.iterrows():
+            st.markdown(f"### {row['Game']}")
+            st.markdown(f"**Pick:** {row['Pick']} | **Odds:** {row['Odds']}")
+
+            if row["Sport"] == "NBA":
+                st.markdown(f"**Probability:** {row['Probability']:.1f}%")
+                st.progress(min(row["Probability"]/100, 1))
+
+            if row["Sport"] == "NHL":
+                st.markdown(f"**Edge:** {row['Edge']:.1f}%")
+                st.progress(min(abs(row["Edge"])/15, 1))
+
+            st.divider()
+
+# ---------------- PERFORMANCE ----------------
 with tabs[3]:
-    if all_bets:
-        best = pd.concat(all_bets, ignore_index=True)
-        if "Edge %" in best.columns:
-            st.dataframe(best.sort_values(by=["Edge %","Probability"], ascending=False))
-        else:
-            st.dataframe(best.sort_values(by="Probability", ascending=False))
+    st.header("📈 Performance")
+
+    if history.empty:
+        st.info("No tracked bets yet.")
+    else:
+        for sport in history["Sport"].unique():
+            h = history[history["Sport"] == sport]
+            wins = (h["Result"] == "Win").sum()
+            losses = (h["Result"] == "Loss").sum()
+            roi = h["Units"].sum()
+
+            st.subheader(sport)
+            st.write(f"Record: {wins}-{losses}")
+            st.write(f"ROI: {roi:.2f} units")
