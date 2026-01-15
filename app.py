@@ -26,9 +26,14 @@ SPORTS = {
 
 # ---------------- UTILITIES ----------------
 def american_to_prob(odds):
-    if odds < 0:
-        return abs(odds) / (abs(odds) + 100)
-    return 100 / (odds + 100)
+    odds = float(odds)
+    if odds > 0:
+        return 100 / (odds + 100)
+    else:
+        return -odds / (-odds + 100)
+
+def spread_strength(spread):
+    return min(abs(float(spread)) / 10, 1)
 
 def implied_prob(odds):
     return american_to_prob(odds)
@@ -89,14 +94,26 @@ def build_games(sport, config, model, history):
         odds = best["price"]
         pick = best["name"]
 
-        implied = implied_prob(odds)
+        market_prob = american_to_prob(odds)
 
-        if config["mode"] == "prob":
-            prob = model.predict_proba([[odds]])[0][1] if model else implied
+        # ---------------- NEW MODEL LOGIC ----------------
+        if config["mode"] == "prob":  # NBA
+            spread_power = spread_strength(odds)
+            if model:
+                model_adjustment = model.predict_proba([[market_prob, spread_power]])[0][1]
+                final_prob = (market_prob * 0.6) + (model_adjustment * 0.4)
+            else:
+                final_prob = market_prob
+            prob = final_prob
             edge = None
-        else:
+        elif config["mode"] == "edge":  # NHL
+            if model:
+                model_prob = model.predict_proba([[market_prob]])[0][1]
+                edge = (model_prob - market_prob) * 100
+            else:
+                edge = (market_prob - 0.5) * 100
             prob = None
-            edge = (implied - 0.5) * 100
+        # -------------------------------------------------
 
         games.append({
             "Sport": sport,
