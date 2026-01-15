@@ -128,16 +128,13 @@ def run_model(df, log_path):
     else:
         hist = pd.DataFrame()
 
-    # Features for training
     df_model = df.copy()
     try:
-        # Encode teams for model
         le = LabelEncoder()
         df_model["Home_enc"] = le.fit_transform(df_model["Home Team"])
         df_model["Away_enc"] = le.fit_transform(df_model["Away Team"])
         X = df_model[["Home_enc","Away_enc","Book Odds"]]
 
-        # Train on historical if available
         if not hist.empty:
             hist = hist.copy()
             hist["Home_enc"] = le.fit_transform(hist["Home Team"])
@@ -148,10 +145,13 @@ def run_model(df, log_path):
             model.fit(X_hist,y_hist)
             df_model["Model_Prob"] = model.predict_proba(X)[:,1]
         else:
-            # Random variation if no history
             df_model["Model_Prob"] = 0.45 + 0.1*np.random.rand(len(df_model))
+
+        # Cap probabilities for realistic edges
+        df_model["Model_Prob"] = df_model["Model_Prob"].clip(0.25,0.75)
+
     except:
-        df_model["Model_Prob"] = 0.52
+        df_model["Model_Prob"]=0.52
 
     return df_model
 
@@ -174,9 +174,23 @@ def update_results(log_path, sport):
                 if game:
                     df.at[idx,"Result"] = "WIN" if (game["home_team_score"]>game["visitor_team_score"] and row["Bet On"]==row["Home Team"]) else "LOSS" if row["Bet On"]==row["Home Team"] else "WIN" if (game["home_team_score"]<game["visitor_team_score"] and row["Bet On"]==row["Away Team"]) else "LOSS"
             elif sport=="NFL":
-                df.at[idx,"Result"]="PENDING"  # Placeholder; API integration optional
-            else:
-                df.at[idx,"Result"]="PENDING"  # Placeholder NHL
+                df.at[idx,"Result"]="PENDING"  # Placeholder
+            else:  # NHL
+                date_str = row["Date"]
+                url=f"https://statsapi.web.nhl.com/api/v1/schedule?date={date_str}"
+                data = safe_request(url)
+                # Match teams and update result
+                for date_game in data.get("dates",[]):
+                    for g in date_game.get("games",[]):
+                        home = g["teams"]["home"]["team"]["name"]
+                        away = g["teams"]["away"]["team"]["name"]
+                        if home==row["Home Team"] and away==row["Away Team"]:
+                            home_score=g["teams"]["home"]["score"]
+                            away_score=g["teams"]["away"]["score"]
+                            if row["Bet On"]==home:
+                                df.at[idx,"Result"]="WIN" if home_score>away_score else "LOSS"
+                            else:
+                                df.at[idx,"Result"]="WIN" if away_score>home_score else "LOSS"
         except:
             continue
     df.to_csv(log_path,index=False)
@@ -187,7 +201,6 @@ def update_results(log_path, sport):
 screen = st.sidebar.radio("Select Sport", ["NBA","NFL","NHL"])
 st.title(f"{screen} Betting Edge Finder")
 
-# Fetch odds
 if screen=="NBA":
     df = fetch_odds("basketball_nba","spreads")
     df = run_model(df,NBA_LOG)
@@ -201,14 +214,15 @@ else:
     df = run_model(df,NHL_LOG)
     LOG_PATH = NHL_LOG
 
-# Update results automatically
 update_results(LOG_PATH,screen)
 
 if df.empty:
     st.info("No games available right now.")
     st.stop()
 
-# Calculate edge & bets
+# ======================
+# CALCULATE EDGE & BET
+# ======================
 df["Book Prob"] = df["Book Odds"].apply(odds_to_prob)
 if screen=="NHL":
     df["Edge %"] = (df["Model_Prob"]-df["Book Prob"])*100
@@ -216,9 +230,9 @@ else:
     df["Edge %"] = (df["Model_Prob"] - 0.5)*100  # Spread probability
 
 df["Fair Odds"] = df["Model_Prob"].apply(prob_to_odds)
-df["Confidence"] = df["Edge %"].apply(edge_confidence)
-df["Bet On"] = df.apply(pick_team,axis=1)
 df["Abs Edge %"] = df["Edge %"].abs()
+df["Confidence"] = df["Abs Edge %"].apply(edge_confidence)
+df["Bet On"] = df.apply(pick_team,axis=1)
 
 # HIGH EDGE ALERT
 high_edge = df[df["Abs Edge %"]>=HIGH_EDGE_THRESHOLD]
