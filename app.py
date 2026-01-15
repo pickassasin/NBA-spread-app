@@ -35,9 +35,6 @@ def american_to_prob(odds):
 def spread_strength(spread):
     return min(abs(float(spread)) / 10, 1)
 
-def implied_prob(odds):
-    return american_to_prob(odds)
-
 def load_history():
     try:
         return pd.read_csv(HISTORY_FILE)
@@ -49,13 +46,24 @@ def load_history():
 def save_history(df):
     df.to_csv(HISTORY_FILE, index=False)
 
+# ---------------- TEAM STATS PLACEHOLDER ----------------
+# Replace with real stats or API in future; for now we mock with random for demo
+def get_team_elo(team):
+    return np.random.randint(1300, 1800)  # Elo rating
+
+def get_recent_form(team):
+    return np.random.rand()  # 0 to 1
+
+def get_rest_days(team):
+    return np.random.randint(0, 5)
+
 # ---------------- MODEL ----------------
 def train_model(history, sport):
     data = history[history["Sport"] == sport]
     if len(data) < 25:
         return None
 
-    X = data[["Odds"]]
+    X = data[["Odds"]]  # Placeholder; future: include all stats
     y = (data["Result"] == "Win").astype(int)
 
     model = LogisticRegression()
@@ -97,18 +105,30 @@ def build_games(sport, config, model, history):
         market_prob = american_to_prob(odds)
 
         # ---------------- NEW MODEL LOGIC ----------------
-        if config["mode"] == "prob":  # NBA
-            spread_power = spread_strength(odds)
+        # Stats
+        home_adv = 1 if pick == home else 0
+        team_elo = get_team_elo(pick)
+        opp_elo = get_team_elo(away if pick==home else home)
+        recent_form = get_recent_form(pick)
+        rest_days = get_rest_days(pick)
+        spread_power = spread_strength(odds)
+
+        # NBA probability
+        if config["mode"] == "prob":
             if model:
-                model_adjustment = model.predict_proba([[market_prob, spread_power]])[0][1]
+                X_input = [[market_prob, spread_power, home_adv, team_elo, opp_elo, recent_form, rest_days]]
+                model_adjustment = model.predict_proba(X_input)[0][1]
                 final_prob = (market_prob * 0.6) + (model_adjustment * 0.4)
             else:
                 final_prob = market_prob
             prob = final_prob
             edge = None
-        elif config["mode"] == "edge":  # NHL
+
+        # NHL edge %
+        elif config["mode"] == "edge":
             if model:
-                model_prob = model.predict_proba([[market_prob]])[0][1]
+                X_input = [[market_prob, home_adv, team_elo, opp_elo, recent_form]]
+                model_prob = model.predict_proba(X_input)[0][1]
                 edge = (model_prob - market_prob) * 100
             else:
                 edge = (market_prob - 0.5) * 100
