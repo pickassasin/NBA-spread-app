@@ -33,7 +33,7 @@ def build_elo(history, base=1500, k=20):
     return elo
 
 # ---------------- DAILY SCHEDULES ---------------- #
-# Replace with API calls for live games if needed
+# Replace with live API later
 DAILY_GAMES = {
     "NBA":[
         ("Memphis Grizzlies","Orlando Magic"),
@@ -47,7 +47,8 @@ DAILY_GAMES = {
         ("Minnesota Wild","Winnipeg Jets")
     ],
     "NFL":[
-        # No games today (Jan 15, 2026)
+        ("Kansas City Chiefs","Buffalo Bills"),
+        ("Green Bay Packers","Chicago Bears")
     ]
 }
 
@@ -57,7 +58,7 @@ def train_model(sport, history):
     df = df[df["Result"].isin(["WIN","LOSS"])]
     elo = build_elo(history)
     if len(df)<10:
-        return None, elo  # always return a tuple
+        return None, elo
     df["EloDiff"] = df["Home"].map(elo).fillna(1500)-df["Away"].map(elo).fillna(1500)
     df["Target"] = (df["Result"]=="WIN").astype(int)
     X = df[["EloDiff"]]
@@ -81,7 +82,6 @@ for i,sport in enumerate(SPORTS):
             st.info("No games today.")
             continue
 
-        # Train model and get Elo
         model, elo = train_model(sport, history)
 
         table = pd.DataFrame({
@@ -90,15 +90,18 @@ for i,sport in enumerate(SPORTS):
         })
         table["EloDiff"] = table["Home"].map(elo).fillna(1500)-table["Away"].map(elo).fillna(1500)
 
-        # Predict probabilities
-        if model:
-            table["Probability"] = model.predict_proba(table[["EloDiff"]])[:,1]
-        else:
-            table["Probability"] = 0.5 + 0.05*table["EloDiff"]
+        # Predict probabilities for NBA/NFL, clamp 0-1
+        if sport in ["NBA","NFL"]:
+            if model:
+                table["Probability"] = model.predict_proba(table[["EloDiff"]])[:,1]
+            else:
+                table["Probability"] = np.clip(0.5 + 0.05*table["EloDiff"],0,1)
+        else:  # NHL uses edge %
+            table["Probability"] = np.clip(0.5 + 0.05*table["EloDiff"],0,1)
+            table["Edge %"] = (table["Probability"]-0.5)*200
 
         # Determine picks
         if sport=="NHL":
-            table["Edge %"] = (table["Probability"]-0.5)*200
             table["BetOn"] = np.where(table["Edge %"]>0, table["Home"], table["Away"])
         else:
             table["BetOn"] = np.where(table["Probability"]>=0.5, table["Home"], table["Away"])
