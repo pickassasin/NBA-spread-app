@@ -1,224 +1,218 @@
 import streamlit as st
-import requests, pandas as pd, numpy as np, os
-from datetime import datetime, timedelta
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder
+import pandas as pd
+import numpy as np
+import requests
+import os
+import joblib
+from datetime import datetime
+from sklearn.linear_model import LogisticRegression
 
-st.set_page_config(layout="wide", page_title="Auto Sports Betting App")
+st.set_page_config(page_title="Self-Learning Sports Model", layout="wide")
 
 API_KEY = st.secrets["ODDS_API_KEY"]
+HISTORY_FILE = "bet_history.csv"
 
-LOGS = {
-    "NBA": "nba_bets.csv",
-    "NFL": "nfl_bets.csv",
-    "NHL": "nhl_bets.csv"
+SPORTS = {
+    "NBA": {"key": "basketball_nba", "market": "spreads", "model": "nba_model.pkl"},
+    "NFL": {"key": "americanfootball_nfl", "market": "spreads", "model": "nfl_model.pkl"},
+    "NHL": {"key": "icehockey_nhl", "market": "h2h", "model": "nhl_model.pkl"}
 }
 
-EDGE_ALERT = 6
+# ------------------ CORE UTILITIES ------------------ #
 
-# ---------------- UTIL ---------------- #
+def odds_to_prob(odds):
+    return 100 / (odds + 100) if odds > 0 else abs(odds) / (abs(odds) + 100)
 
-def safe_json(url, params=None):
-    try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
-            return None
-        return r.json()
-    except:
-        return None
-
-def odds_to_prob(o):
-    return 100/(o+100) if o>0 else abs(o)/(abs(o)+100)
-
-def prob_to_odds(p):
-    return int(-100*p/(1-p)) if p>0.5 else int(100*(1-p)/p)
-
-def confidence(x):
-    if x >= 6: return "HIGH"
-    if x >= 3: return "MED"
-    return "LOW"
-
-def init_log(path):
-    if not os.path.exists(path):
+def init_history():
+    if not os.path.exists(HISTORY_FILE):
         pd.DataFrame(columns=[
-            "Date","Sport","Home","Away","Bet On",
-            "Book Odds","Model Prob","Result"
-        ]).to_csv(path, index=False)
+            "Date","Sport","Home","Away","BetOn","Odds",
+            "Result","Units"
+        ]).to_csv(HISTORY_FILE, index=False)
 
-def log_bets(df, sport):
-    path = LOGS[sport]
-    init_log(path)
-    old = pd.read_csv(path)
-    df["Date"] = datetime.utcnow().date()
-    df["Sport"] = sport
-    df["Result"] = "PENDING"
-    new = pd.concat([old, df]).drop_duplicates(
-        subset=["Date","Sport","Home","Away","Bet On"]
-    )
-    new.to_csv(path, index=False)
-
-# ---------------- RESULTS ---------------- #
-
-def update_results():
-    for sport, path in LOGS.items():
-        if not os.path.exists(path): continue
-        df = pd.read_csv(path)
-        pending = df[df["Result"]=="PENDING"]
-
-        for i,r in pending.iterrows():
-            d = r["Date"]
-
-            try:
-                if sport=="NBA":
-                    url=f"https://www.balldontlie.io/api/v1/games?start_date={d}&end_date={d}"
-                    data = safe_json(url)
-                    if not data: continue
-                    for g in data["data"]:
-                        if g["home_team"]["full_name"]==r["Home"]:
-                            h,a=g["home_team_score"],g["visitor_team_score"]
-                            df.at[i,"Result"]="WIN" if (
-                                (h>a and r["Bet On"]==r["Home"]) or
-                                (a>h and r["Bet On"]==r["Away"])
-                            ) else "LOSS"
-
-                elif sport=="NHL":
-                    url=f"https://statsapi.web.nhl.com/api/v1/schedule?date={d}"
-                    data = safe_json(url)
-                    if not data: continue
-                    for day in data.get("dates",[]):
-                        for g in day["games"]:
-                            h=g["teams"]["home"]["team"]["name"]
-                            a=g["teams"]["away"]["team"]["name"]
-                            if h==r["Home"]:
-                                hs,as_=g["teams"]["home"]["score"],g["teams"]["away"]["score"]
-                                df.at[i,"Result"]="WIN" if (
-                                    (hs>as_ and r["Bet On"]==h) or
-                                    (as_>hs and r["Bet On"]==a)
-                                ) else "LOSS"
-
-                elif sport=="NFL":
-                    url="https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
-                    data = safe_json(url)
-                    if not data: continue
-                    for g in data.get("events",[]):
-                        teams=g["competitions"][0]["competitors"]
-                        h=teams[0]["team"]["displayName"]
-                        a=teams[1]["team"]["displayName"]
-                        if h==r["Home"]:
-                            hs=int(teams[0]["score"])
-                            as_=int(teams[1]["score"])
-                            df.at[i,"Result"]="WIN" if (
-                                (hs>as_ and r["Bet On"]==h) or
-                                (as_>hs and r["Bet On"]==a)
-                            ) else "LOSS"
-            except:
-                continue
-
-        df.to_csv(path, index=False)
-
-# ---------------- MODEL ---------------- #
-
-def run_model(df, log_path):
-    if df.empty:
-        df["Model Prob"]=0.52
-        return df
-
-    hist = pd.read_csv(log_path) if os.path.exists(log_path) else pd.DataFrame()
-    hist = hist[hist["Result"].isin(["WIN","LOSS"])]
-
+def fetch_odds(sport_key, market):
     try:
-        le = LabelEncoder()
-        df["H"]=le.fit_transform(df["Home"])
-        df["A"]=le.fit_transform(df["Away"])
-        X=df[["H","A","Book Odds"]]
-
-        if not hist.empty:
-            hist["H"]=le.fit_transform(hist["Home"])
-            hist["A"]=le.fit_transform(hist["Away"])
-            y=(hist["Result"]=="WIN").astype(int)
-            model=RandomForestClassifier()
-            model.fit(hist[["H","A","Book Odds"]],y)
-            df["Model Prob"]=model.predict_proba(X)[:,1]
-        else:
-            df["Model Prob"]=0.45+0.1*np.random.rand(len(df))
-
-        df["Model Prob"]=df["Model Prob"].clip(0.25,0.75)
+        r = requests.get(
+            f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds",
+            params={
+                "apiKey": API_KEY,
+                "regions": "us",
+                "markets": market,
+                "oddsFormat": "american"
+            },
+            timeout=10
+        )
+        if r.status_code != 200:
+            return pd.DataFrame()
+        data = r.json()
     except:
-        df["Model Prob"]=0.52
+        return pd.DataFrame()
 
-    return df
-
-# ---------------- ODDS ---------------- #
-
-def fetch_odds(sport, market):
-    key={
-        "NBA":"basketball_nba",
-        "NFL":"americanfootball_nfl",
-        "NHL":"icehockey_nhl"
-    }[sport]
-
-    url=f"https://api.the-odds-api.com/v4/sports/{key}/odds"
-    data=safe_json(url,{
-        "apiKey":API_KEY,"regions":"us","markets":market,"oddsFormat":"american"
-    })
-
-    games=[]
-    if not data: return pd.DataFrame()
-
+    rows = []
     for g in data:
         try:
-            bm=g["bookmakers"][0]
-            out=bm["markets"][0]["outcomes"]
-            home=g["home_team"]
-            price=next(o["price"] for o in out if o["name"]==home)
-            games.append({
-                "Home":g["home_team"],
-                "Away":g["away_team"],
-                "Book Odds":price
+            book = g["bookmakers"][0]
+            market_data = book["markets"][0]["outcomes"]
+            home = g["home_team"]
+            away = g["away_team"]
+            home_odds = next(o["price"] for o in market_data if o["name"] == home)
+
+            rows.append({
+                "Home": home,
+                "Away": away,
+                "Odds": home_odds
             })
         except:
             continue
 
-    return pd.DataFrame(games)
+    return pd.DataFrame(rows)
 
-# ---------------- MAIN ---------------- #
+# ------------------ ELO SYSTEM ------------------ #
 
-update_results()
+def build_elo(history, base=1500, k=20):
+    elo = {}
 
-tabs = st.tabs(["NBA","NFL","NHL","🔥 Best Bets"])
-
-ALL_BETS=[]
-
-for i,sport in enumerate(["NBA","NFL","NHL"]):
-    with tabs[i]:
-        market="spreads" if sport!="NHL" else "h2h"
-        df=fetch_odds(sport,market)
-        df=run_model(df,LOGS[sport])
-
-        if df.empty:
-            st.info("No games available.")
+    for _, r in history.iterrows():
+        if r["Result"] not in ["WIN", "LOSS"]:
             continue
 
-        df["Bet On"]=np.where(df["Model Prob"]>=0.5,df["Home"],df["Away"])
+        h, a = r["Home"], r["Away"]
+        elo.setdefault(h, base)
+        elo.setdefault(a, base)
 
-        if sport=="NHL":
-            df["Edge %"]=(df["Model Prob"]-df["Book Odds"].apply(odds_to_prob))*100
-            df["Strength"]=df["Edge %"].abs()
+        expected = 1 / (1 + 10 ** ((elo[a] - elo[h]) / 400))
+        score = 1 if r["BetOn"] == h else 0
+
+        elo[h] += k * (score - expected)
+        elo[a] -= k * (score - expected)
+
+    return elo
+
+# ------------------ MODEL TRAINING ------------------ #
+
+def train_model(sport, history, model_path):
+    df = history[history["Sport"] == sport]
+    df = df[df["Result"].isin(["WIN", "LOSS"])]
+
+    if len(df) < 30:
+        return None
+
+    elo = build_elo(df)
+    df["EloDiff"] = df["Home"].map(elo).fillna(1500) - df["Away"].map(elo).fillna(1500)
+    df["MarketProb"] = df["Odds"].apply(odds_to_prob)
+    df["Target"] = (df["Result"] == "WIN").astype(int)
+
+    X = df[["EloDiff", "MarketProb"]]
+    y = df["Target"]
+
+    model = LogisticRegression()
+    model.fit(X, y)
+    joblib.dump(model, model_path)
+    return model
+
+def load_or_train(sport, history, model_path):
+    if os.path.exists(model_path):
+        try:
+            return joblib.load(model_path)
+        except:
+            pass
+    return train_model(sport, history, model_path)
+
+# ------------------ GRADING ------------------ #
+
+def grade_bets(history):
+    pending = history[history["Result"] == "PENDING"]
+    if pending.empty:
+        return history
+
+    for idx, row in pending.iterrows():
+        try:
+            scores = requests.get(
+                f"https://api.the-odds-api.com/v4/sports/{SPORTS[row['Sport']]['key']}/scores",
+                params={"apiKey": API_KEY},
+                timeout=10
+            ).json()
+
+            for g in scores:
+                if g["home_team"] == row["Home"] and g["completed"]:
+                    home_score = g["scores"][0]["score"]
+                    away_score = g["scores"][1]["score"]
+                    winner = row["Home"] if home_score > away_score else row["Away"]
+
+                    history.at[idx, "Result"] = "WIN" if row["BetOn"] == winner else "LOSS"
+                    history.at[idx, "Units"] = 1 if row["BetOn"] == winner else -1
+        except:
+            continue
+
+    history.to_csv(HISTORY_FILE, index=False)
+    return history
+
+# ------------------ APP ------------------ #
+
+init_history()
+history = pd.read_csv(HISTORY_FILE)
+history = grade_bets(history)
+
+tabs = st.tabs(["NBA", "NFL", "NHL", "🔥 Best Bets", "📊 Performance"])
+all_bets = []
+
+for i, sport in enumerate(["NBA", "NFL", "NHL"]):
+    with tabs[i]:
+        cfg = SPORTS[sport]
+        odds = fetch_odds(cfg["key"], cfg["market"])
+
+        if odds.empty:
+            st.info("No games available")
+            continue
+
+        model = load_or_train(sport, history, cfg["model"])
+        elo = build_elo(history[history["Sport"] == sport])
+
+        odds["EloDiff"] = odds["Home"].map(elo).fillna(1500) - odds["Away"].map(elo).fillna(1500)
+        odds["MarketProb"] = odds["Odds"].apply(odds_to_prob)
+
+        if model:
+            odds["ModelProb"] = model.predict_proba(
+                odds[["EloDiff", "MarketProb"]]
+            )[:,1]
         else:
-            df["Probability %"]=df["Model Prob"]*100
-            df["Strength"]=abs(df["Probability %"]-50)
+            odds["ModelProb"] = odds["MarketProb"]
 
-        df["Confidence"]=df["Strength"].apply(confidence)
+        if sport == "NHL":
+            odds["Edge %"] = ((odds["ModelProb"] - odds["MarketProb"]) * 100).round(2)
+            odds["BetOn"] = np.where(odds["Edge %"] > 0, odds["Home"], odds["Away"])
+        else:
+            odds["Probability %"] = (odds["ModelProb"] * 100).round(1)
+            odds["BetOn"] = np.where(odds["ModelProb"] >= 0.5, odds["Home"], odds["Away"])
 
-        log_bets(df[["Home","Away","Bet On","Book Odds","Model Prob"]],sport)
-        ALL_BETS.append(df.assign(Sport=sport))
+        st.dataframe(odds, use_container_width=True)
 
-        st.dataframe(
-            df.sort_values("Strength",ascending=False),
-            use_container_width=True
-        )
+        save = odds.copy()
+        save["Date"] = datetime.utcnow().date().isoformat()
+        save["Sport"] = sport
+        save["Result"] = "PENDING"
+        save["Units"] = 0
+
+        history = pd.concat([history, save[
+            ["Date","Sport","Home","Away","BetOn","Odds","Result","Units"]
+        ]])
+
+        history.to_csv(HISTORY_FILE, index=False)
+        all_bets.append(odds.assign(Sport=sport))
 
 with tabs[3]:
-    best=pd.concat(ALL_BETS)
-    best=best[best["Strength"]>=EDGE_ALERT]
-    st.dataframe(best.sort_values("Strength",ascending=False),use_container_width=True)
+    if all_bets:
+        st.dataframe(pd.concat(all_bets), use_container_width=True)
+
+with tabs[4]:
+    for sport in SPORTS:
+        df = history[history["Sport"] == sport]
+        wins = (df["Result"] == "WIN").sum()
+        losses = (df["Result"] == "LOSS").sum()
+        units = df["Units"].sum()
+        roi = (units / max(len(df),1)) * 100
+
+        st.subheader(sport)
+        st.metric("Record", f"{wins}-{losses}")
+        st.metric("ROI %", f"{roi:.1f}%")
+        st.metric("Units", f"{units:.1f}")
