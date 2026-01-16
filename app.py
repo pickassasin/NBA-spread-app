@@ -91,19 +91,25 @@ def get_games_today():
     return pd.DataFrame(games)
 
 ############################################
-# SIMPLE LEARNING MODEL
+# STAT-BASED MODEL (NBA/NHL)
 ############################################
 
-def model_probability():
-    history = load_history()
-    if history.empty:
-        return 0.53
-    wins = len(history[history["Result"]=="Win"])
-    total = len(history)
-    return min(max(0.5 + (wins-total/2)/100, 0.45), 0.65)
+def calculate_model_prob(row):
+    """
+    Returns model probability for a team based on mock stats.
+    """
+    # SAFE stats (can be replaced by real API later)
+    np.random.seed(hash(row['Team']) % 2**32)
+    recent_form = np.random.uniform(0.4, 0.7)   # win rate last 5 games
+    offense = np.random.uniform(0.4, 0.7)       # points scored factor
+    defense = np.random.uniform(0.4, 0.7)       # points allowed factor
+    home_adv = 0.05 if "@ " not in row["Game"].split(" @ ")[0] else 0
+
+    prob = recent_form * 0.5 + offense * 0.3 + (1-defense) * 0.2 + home_adv
+    return min(max(prob, 0.05), 0.95)
 
 ############################################
-# RESULT GRADING (SAFE)
+# AUTO RESULT CHECK (SAFE)
 ############################################
 
 def update_results():
@@ -145,16 +151,16 @@ st.divider()
 st.header("📅 Today's Games & Picks")
 
 games = get_games_today()
-prob = model_probability()
 
-games["Model Probability %"] = round(prob*100,1)
+# Calculate model probability and edge
+games["Model Probability %"] = games.apply(lambda r: round(calculate_model_prob(r)*100,1), axis=1)
 games["Implied Probability %"] = games["Odds"].apply(lambda x: round(american_to_prob(x)*100,1))
 games["Confidence %"] = games["Model Probability %"] - games["Implied Probability %"]
 
 st.dataframe(games, use_container_width=True)
 
 ############################################
-# 🏆 BEST BETS + CONFIDENCE BARS (ADDED)
+# 🏆 BEST BETS + COLOR-CODED CONFIDENCE BARS
 ############################################
 
 st.divider()
@@ -170,7 +176,24 @@ else:
     for _, row in best_bets.iterrows():
         st.subheader(f"{row['Sport']} — {row['Team']}")
         st.caption(f"{row['Game']} | Odds: {row['Odds']}")
-        st.progress(min(max(int(row["Confidence %"]), 0), 100))
+
+        conf = min(max(int(row["Confidence %"]), 0), 100)
+
+        if conf >= 10:
+            bar_color = "#28a745"  # green
+        elif conf >= 5:
+            bar_color = "#ffc107"  # yellow
+        else:
+            bar_color = "#dc3545"  # red
+
+        st.markdown(
+            f"""
+            <div style="background-color:#e0e0e0; width:100%; height:20px; border-radius:5px;">
+                <div style="background-color:{bar_color}; width:{conf}%; height:100%; border-radius:5px;"></div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
         st.write(f"Confidence: **{round(row['Confidence %'],1)}%**")
 
 ############################################
