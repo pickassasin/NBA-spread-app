@@ -96,17 +96,17 @@ def get_games_today():
 
 def calculate_model_prob(row):
     """
-    Returns model probability for a team based on mock stats.
+    Returns model probability for a team based on multiple stats.
     """
-    # SAFE stats (can be replaced by real API later)
+    # SAFE mock stats to avoid errors
     np.random.seed(hash(row['Team']) % 2**32)
-    recent_form = np.random.uniform(0.4, 0.7)   # win rate last 5 games
-    offense = np.random.uniform(0.4, 0.7)       # points scored factor
-    defense = np.random.uniform(0.4, 0.7)       # points allowed factor
+    recent_form = np.random.uniform(0.45, 0.7)   # last 5 games win %
+    offense = np.random.uniform(0.4, 0.7)        # scoring power
+    defense = np.random.uniform(0.4, 0.7)        # defensive ability
     home_adv = 0.05 if "@ " not in row["Game"].split(" @ ")[0] else 0
 
-    prob = recent_form * 0.5 + offense * 0.3 + (1-defense) * 0.2 + home_adv
-    return min(max(prob, 0.05), 0.95)
+    prob = recent_form * 0.5 + offense * 0.25 + (1-defense) * 0.2 + home_adv
+    return min(max(prob, 0.05), 0.95)  # ensure between 5% and 95%
 
 ############################################
 # AUTO RESULT CHECK (SAFE)
@@ -152,10 +152,13 @@ st.header("📅 Today's Games & Picks")
 
 games = get_games_today()
 
-# Calculate model probability and edge
+# Model probability
 games["Model Probability %"] = games.apply(lambda r: round(calculate_model_prob(r)*100,1), axis=1)
+# Implied probability from odds
 games["Implied Probability %"] = games["Odds"].apply(lambda x: round(american_to_prob(x)*100,1))
+# Confidence = positive difference only
 games["Confidence %"] = games["Model Probability %"] - games["Implied Probability %"]
+games["Confidence %"] = games["Confidence %"].apply(lambda x: x if x > 0 else 0)
 
 st.dataframe(games, use_container_width=True)
 
