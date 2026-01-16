@@ -8,6 +8,7 @@ import os
 st.set_page_config(page_title="Sports Betting Model", layout="wide")
 
 HISTORY_FILE = "history.csv"
+ODDS_API_KEY = "fb78c9cf149ca0d18b6e70ac6d28075a"
 
 ############################################
 # SAFE HELPERS
@@ -52,41 +53,41 @@ def calculate_roi(df):
     return round(roi*100,2), record
 
 ############################################
-# LIVE GAME DATA
+# FETCH LIVE ODDS
 ############################################
 
-def get_games_today():
-    # NBA games
-    nba_games = []
-    date = datetime.now().strftime("%Y-%m-%d")
-    nba_url = f"https://www.balldontlie.io/api/v1/games?start_date={date}&end_date={date}&per_page=100"
-    nba_data = safe_request(nba_url)
-    if nba_data and "data" in nba_data:
-        for g in nba_data["data"]:
-            home = g["home_team"]["full_name"]
-            away = g["visitor_team"]["full_name"]
-            nba_games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":home,"Odds":-110})
-            nba_games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":away,"Odds":100})
-
-    # NHL games
-    nhl_games = []
-    nhl_url = f"https://statsapi.web.nhl.com/api/v1/schedule?date={date}"
-    nhl_data = safe_request(nhl_url)
-    if nhl_data and nhl_data.get("dates"):
-        for date_block in nhl_data["dates"]:
-            for g in date_block["games"]:
-                home = g["teams"]["home"]["team"]["name"]
-                away = g["teams"]["away"]["team"]["name"]
-                nhl_games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":home,"Odds":120})
-                nhl_games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":away,"Odds":-130})
-
-    games = pd.DataFrame(nba_games + nhl_games)
-    if games.empty:
-        st.warning("No games found for today.")
-    return games
+def get_live_odds(sport):
+    url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds?apiKey={ODDS_API_KEY}&regions=us&markets=spreads,totals,h2h&oddsFormat=american"
+    data = safe_request(url)
+    games = []
+    if data:
+        for g in data:
+            home = g.get("home_team")
+            away = g.get("away_team")
+            game_str = f"{away} @ {home}"
+            # pick spread odds for NBA
+            spread = next((m for m in g["bookmakers"][0]["markets"] if m["key"]=="spreads"), None)
+            h2h = next((m for m in g["bookmakers"][0]["markets"] if m["key"]=="h2h"), None)
+            if spread:
+                for o in spread["outcomes"]:
+                    games.append({
+                        "Sport": "NBA",
+                        "Game": game_str,
+                        "Team": o["name"],
+                        "Odds": o["price"]
+                    })
+            elif h2h and sport=="icehockey_nhl":
+                for o in h2h["outcomes"]:
+                    games.append({
+                        "Sport": "NHL",
+                        "Game": game_str,
+                        "Team": o["name"],
+                        "Odds": o["price"]
+                    })
+    return pd.DataFrame(games)
 
 ############################################
-# SIMPLE LEARNING MODEL
+# MODEL PROBABILITY / EDGE
 ############################################
 
 def calculate_model_prob(row):
@@ -95,7 +96,12 @@ def calculate_model_prob(row):
         return 0.53
     wins = len(history[history["Result"]=="Win"])
     total = len(history)
-    return min(max(0.5 + (wins-total/2)/100, 0.45), 0.65)
+    base_prob = min(max(0.5 + (wins-total/2)/100, 0.45), 0.65)
+    # Adjust edge for NHL
+    if row["Sport"]=="NHL":
+        implied = american_to_prob(row["Odds"])
+        return round((base_prob - implied)*100,1)
+    return base_prob
 
 ############################################
 # AUTO RESULT CHECK (SIMULATED)
@@ -120,27 +126,27 @@ st.title("📊 Self-Learning Sports Betting App")
 
 history = load_history()
 history = update_results()
-
 roi, record = calculate_roi(history)
 
 st.metric("ROI %", roi)
 st.metric("Record", record)
 
 st.divider()
-
 st.header("📅 Today's Games & Picks")
 
-games = get_games_today()
+# Fetch NBA and NHL live odds
+nba_games = get_live_odds("basketball_nba")
+nhl_games = get_live_odds("icehockey_nhl")
+games = pd.concat([nba_games, nhl_games], ignore_index=True)
 
-if not games.empty:
+if games.empty:
+    st.warning("No live games or odds available.")
+else:
     games["Model Probability %"] = games.apply(lambda r: round(calculate_model_prob(r)*100,1), axis=1)
     games["Implied Probability %"] = games["Odds"].apply(lambda x: round(american_to_prob(x)*100,1))
-    # Confidence bar (color-coded)
-    games["Confidence %"] = games["Model Probability %"] - games["Implied Probability %"]
-    games["Confidence %"] = games["Confidence %"].apply(lambda x: max(0,x))
+    # Confidence bars
+    games["Confidence %"] = np.maximum(games["Model Probability %"] - games["Implied Probability %"],0)
     st.dataframe(games, use_container_width=True)
-else:
-    st.warning("No games available to display today.")
 
 ############################################
 # BET SLIP
