@@ -52,13 +52,13 @@ def calculate_roi(df):
     return round(roi*100,2), record
 
 ############################################
-# FETCH TODAY + TOMORROW NBA GAMES
+# LIVE GAME DATA
 ############################################
 
 def get_games_today_nba():
     games = []
     for offset in range(0,2):  # today + tomorrow
-        date = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
+        date = (datetime.now() + pd.Timedelta(days=offset)).strftime("%Y-%m-%d")
         url = f"https://www.balldontlie.io/api/v1/games?start_date={date}&end_date={date}&per_page=100"
         data = safe_request(url)
         if data and "data" in data:
@@ -69,56 +69,76 @@ def get_games_today_nba():
                 games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":away,"Odds":100})
     return pd.DataFrame(games)
 
-############################################
-# FETCH TODAY + TOMORROW NHL GAMES
-############################################
-
 def get_games_today_nhl():
+    today_str = datetime.now().strftime("%Y-%m-%d")
     games = []
-    for offset in range(0,2):  # today + tomorrow
-        date = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
-        url = f"https://statsapi.web.nhl.com/api/v1/schedule?date={date}"
-        data = safe_request(url)
-        if data and "dates" in data and len(data["dates"]) > 0:
-            for g in data["dates"][0]["games"]:
+
+    # First try: daily schedule
+    url_daily = f"https://statsapi.web.nhl.com/api/v1/schedule?date={today_str}"
+    data = safe_request(url_daily)
+
+    # If that fails or no games, try weekly range
+    if not data or not data.get("dates"):
+        start_week = today_str
+        end_week = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+        url_range = f"https://statsapi.web.nhl.com/api/v1/schedule?startDate={start_week}&endDate={end_week}"
+        data = safe_request(url_range)
+
+    # Parse results if available
+    if data and data.get("dates"):
+        for date_block in data["dates"]:
+            for g in date_block["games"]:
                 home = g["teams"]["home"]["team"]["name"]
                 away = g["teams"]["away"]["team"]["name"]
-                games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":home,"Odds":120})
-                games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":away,"Odds":-130})
+                games.append({
+                    "Sport": "NHL",
+                    "Game": f"{away} @ {home}",
+                    "Team": home,
+                    "Odds": 120  # placeholder until real odds API added
+                })
+                games.append({
+                    "Sport": "NHL",
+                    "Game": f"{away} @ {home}",
+                    "Team": away,
+                    "Odds": -130
+                })
+
     return pd.DataFrame(games)
 
+def get_games_today():
+    nba_games = get_games_today_nba()
+    nhl_games = get_games_today_nhl()
+    games = pd.concat([nba_games, nhl_games], ignore_index=True)
+    if games.empty:
+        st.warning("No games found for today or upcoming.")
+    return games
+
 ############################################
-# FIXED STAT-BASED MODEL
+# SIMPLE LEARNING MODEL (NO ERRORS)
 ############################################
 
 def calculate_model_prob(row):
-    # deterministic per team/game, simple placeholder combining stats
-    np.random.seed(hash(row['Team']+row['Game']) % 2**32)
-    recent_form = np.random.uniform(0.4, 0.7)
-    offense = np.random.uniform(0.4, 0.7)
-    defense = np.random.uniform(0.3, 0.6)
-    home_adv = 0.05 if "@ " not in row["Game"].split(" @ ")[0] else 0
-    prob = recent_form*0.5 + offense*0.3 + (1-defense)*0.2 + home_adv
-    return min(max(prob, 0.05), 0.95)
+    # Use historical record and simple stats
+    history = load_history()
+    if history.empty:
+        return 0.53
+    wins = len(history[history["Result"]=="Win"])
+    total = len(history)
+    return min(max(0.5 + (wins-total/2)/100, 0.45), 0.65)
 
 ############################################
-# AUTO RESULT CHECK (SAFE)
+# AUTO RESULT CHECK (SIMULATED SAFE)
 ############################################
 
 def update_results():
     history = load_history()
     if history.empty:
         return history
-    today = datetime.now().date()
     for i,row in history.iterrows():
-        if row["Result"] != "Pending":
-            continue
-        bet_date = datetime.strptime(row["Date"], "%Y-%m-%d").date()
-        if bet_date >= today:
-            continue
-        result = np.random.choice(["Win","Loss"])
-        history.at[i,"Result"] = result
-        history.at[i,"Units"] = 1 if result == "Win" else -1
+        if row["Result"]=="Pending":
+            # simulate final result (safe placeholder)
+            history.at[i,"Result"] = np.random.choice(["Win","Loss"])
+            history.at[i,"Units"] = 1 if history.at[i,"Result"]=="Win" else -1
     save_history(history)
     return history
 
@@ -128,72 +148,32 @@ def update_results():
 
 st.title("📊 Self-Learning Sports Betting App")
 
+history = load_history()
 history = update_results()
+
 roi, record = calculate_roi(history)
 
 st.metric("ROI %", roi)
 st.metric("Record", record)
 
 st.divider()
+
 st.header("📅 Today's Games & Picks")
 
-# Fetch NBA + NHL games today/tomorrow
-nba_games = get_games_today_nba()
-nhl_games = get_games_today_nhl()
-games = pd.concat([nba_games, nhl_games], ignore_index=True)
+games = get_games_today()
 
 if not games.empty:
-    # Model probabilities
     games["Model Probability %"] = games.apply(lambda r: round(calculate_model_prob(r)*100,1), axis=1)
-
-    # Implied probability from odds
     games["Implied Probability %"] = games["Odds"].apply(lambda x: round(american_to_prob(x)*100,1))
-
-    # Confidence / Edge
-    games["Confidence %"] = games["Model Probability %"] - games["Implied Probability %"]
-    games["Confidence %"] = games["Confidence %"].apply(lambda x: x if x > 0 else 0)
-
+    games["Confidence %"] = (games["Model Probability %"] - games["Implied Probability %"]).apply(lambda x: x if x > 0 else 0)
     st.dataframe(games, use_container_width=True)
 else:
-    st.warning("No games found for today or tomorrow.")
-
-############################################
-# BEST BETS + COLOR-CODED CONFIDENCE
-############################################
-
-st.divider()
-st.header("🔥 Best Bets (Model Confidence)")
-
-if not games.empty:
-    best_bets = games[games["Confidence %"] > 0].sort_values("Confidence %", ascending=False)
-    if best_bets.empty:
-        st.info("No positive-edge bets today.")
-    else:
-        for _, row in best_bets.iterrows():
-            st.subheader(f"{row['Sport']} — {row['Team']}")
-            st.caption(f"{row['Game']} | Odds: {row['Odds']}")
-            conf = min(max(int(row["Confidence %"]),0),100)
-            if conf >= 10:
-                bar_color = "#28a745"
-            elif conf >= 5:
-                bar_color = "#ffc107"
-            else:
-                bar_color = "#dc3545"
-            st.markdown(
-                f"""
-                <div style="background-color:#e0e0e0; width:100%; height:20px; border-radius:5px;">
-                    <div style="background-color:{bar_color}; width:{conf}%; height:100%; border-radius:5px;"></div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-            st.write(f"Confidence: **{round(row['Confidence %'],1)}%**")
+    st.warning("No games available to display today.")
 
 ############################################
 # BET SLIP
 ############################################
 
-st.divider()
 st.header("🧾 Bet Slip")
 
 selected_games = st.multiselect(
@@ -202,7 +182,7 @@ selected_games = st.multiselect(
     format_func=lambda i: f"{games.loc[i,'Sport']} | {games.loc[i,'Game']} | {games.loc[i,'Team']} ({games.loc[i,'Odds']})"
 )
 
-if st.button("✅ CONFIRM BETS") and not games.empty:
+if st.button("✅ CONFIRM BETS"):
     new_bets = []
     for i in selected_games:
         row = games.loc[i]
@@ -215,16 +195,16 @@ if st.button("✅ CONFIRM BETS") and not games.empty:
             "Result": "Pending",
             "Units": 0
         })
-
     if new_bets:
         history = pd.concat([history, pd.DataFrame(new_bets)], ignore_index=True)
         save_history(history)
         st.success("Bets confirmed and saved!")
 
+st.divider()
+
 ############################################
 # HISTORY VIEW
 ############################################
 
-st.divider()
 st.header("📈 Bet History")
 st.dataframe(load_history(), use_container_width=True)
