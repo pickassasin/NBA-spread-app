@@ -98,7 +98,7 @@ def calculate_model_prob(row):
     base_prob = min(max(0.5 + (wins-total/2)/100, 0.45), 0.65)
     if row["Sport"]=="NHL":
         implied = american_to_prob(row["Odds"])
-        return round((base_prob - implied)*100,1)
+        return base_prob  # keep model prob for edge calculation later
     return base_prob
 
 ############################################
@@ -146,19 +146,19 @@ else:
     # Fixed Confidence % calculation
     def calculate_confidence(row):
         if row["Sport"] == "NHL":
-            edge = row["Model Probability %"] - row["Implied Probability %"]
-            return max(edge, 0)
+            edge = abs(row["Model Probability %"] - row["Implied Probability %"])
+            return round(edge, 1)
         else:
-            diff = row["Model Probability %"] - row["Implied Probability %"]
-            return max(diff, 0)
+            # NBA uses model probability as confidence
+            return round(row["Model Probability %"], 1)
 
     games["Confidence %"] = games.apply(calculate_confidence, axis=1)
 
     # Color-coded bars
     def color_confidence(val):
-        if val > 20:
+        if val > 60:
             color = 'green'
-        elif val > 10:
+        elif val > 50:
             color = 'orange'
         else:
             color = 'red'
