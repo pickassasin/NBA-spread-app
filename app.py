@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 st.set_page_config(page_title="Sports Betting Model", layout="wide")
@@ -52,39 +52,39 @@ def calculate_roi(df):
     return round(roi*100,2), record
 
 ############################################
-# FETCH TODAY'S NBA GAMES
+# FETCH TODAY + TOMORROW NBA GAMES
 ############################################
 
 def get_games_today_nba():
-    today = datetime.now().strftime("%Y-%m-%d")
-    url = f"https://www.balldontlie.io/api/v1/games?start_date={today}&end_date={today}&per_page=100"
-    data = safe_request(url)
     games = []
-    if data and "data" in data:
-        for g in data["data"]:
-            home = g["home_team"]["full_name"]
-            away = g["visitor_team"]["full_name"]
-            # Placeholder odds
-            games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":home,"Odds":-110})
-            games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":away,"Odds":100})
+    for offset in range(0,2):  # today + tomorrow
+        date = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
+        url = f"https://www.balldontlie.io/api/v1/games?start_date={date}&end_date={date}&per_page=100"
+        data = safe_request(url)
+        if data and "data" in data:
+            for g in data["data"]:
+                home = g["home_team"]["full_name"]
+                away = g["visitor_team"]["full_name"]
+                games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":home,"Odds":-110})
+                games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":away,"Odds":100})
     return pd.DataFrame(games)
 
 ############################################
-# FETCH TODAY'S NHL GAMES
+# FETCH TODAY + TOMORROW NHL GAMES
 ############################################
 
 def get_games_today_nhl():
-    today = datetime.now().strftime("%Y-%m-%d")
-    url = f"https://statsapi.web.nhl.com/api/v1/schedule?date={today}"
-    data = safe_request(url)
     games = []
-    if data and "dates" in data and len(data["dates"]) > 0:
-        for g in data["dates"][0]["games"]:
-            home = g["teams"]["home"]["team"]["name"]
-            away = g["teams"]["away"]["team"]["name"]
-            # Placeholder odds
-            games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":home,"Odds":120})
-            games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":away,"Odds":-130})
+    for offset in range(0,2):  # today + tomorrow
+        date = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
+        url = f"https://statsapi.web.nhl.com/api/v1/schedule?date={date}"
+        data = safe_request(url)
+        if data and "dates" in data and len(data["dates"]) > 0:
+            for g in data["dates"][0]["games"]:
+                home = g["teams"]["home"]["team"]["name"]
+                away = g["teams"]["away"]["team"]["name"]
+                games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":home,"Odds":120})
+                games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":away,"Odds":-130})
     return pd.DataFrame(games)
 
 ############################################
@@ -92,12 +92,13 @@ def get_games_today_nhl():
 ############################################
 
 def calculate_model_prob(row):
-    np.random.seed(hash(row['Team']) % 2**32)
+    # deterministic per team/game, simple placeholder combining stats
+    np.random.seed(hash(row['Team']+row['Game']) % 2**32)
     recent_form = np.random.uniform(0.4, 0.7)
     offense = np.random.uniform(0.4, 0.7)
     defense = np.random.uniform(0.3, 0.6)
     home_adv = 0.05 if "@ " not in row["Game"].split(" @ ")[0] else 0
-    prob = recent_form * 0.5 + offense * 0.3 + (1-defense) * 0.2 + home_adv
+    prob = recent_form*0.5 + offense*0.3 + (1-defense)*0.2 + home_adv
     return min(max(prob, 0.05), 0.95)
 
 ############################################
@@ -136,7 +137,7 @@ st.metric("Record", record)
 st.divider()
 st.header("📅 Today's Games & Picks")
 
-# Fetch NBA + NHL games today
+# Fetch NBA + NHL games today/tomorrow
 nba_games = get_games_today_nba()
 nhl_games = get_games_today_nhl()
 games = pd.concat([nba_games, nhl_games], ignore_index=True)
@@ -154,7 +155,7 @@ if not games.empty:
 
     st.dataframe(games, use_container_width=True)
 else:
-    st.warning("No games found for today.")
+    st.warning("No games found for today or tomorrow.")
 
 ############################################
 # BEST BETS + COLOR-CODED CONFIDENCE
