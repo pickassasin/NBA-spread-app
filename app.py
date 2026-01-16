@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 
 st.set_page_config(page_title="Sports Betting Model", layout="wide")
@@ -55,70 +55,41 @@ def calculate_roi(df):
 # LIVE GAME DATA
 ############################################
 
-def get_games_today_nba():
-    games = []
-    for offset in range(0,2):  # today + tomorrow
-        date = (datetime.now() + pd.Timedelta(days=offset)).strftime("%Y-%m-%d")
-        url = f"https://www.balldontlie.io/api/v1/games?start_date={date}&end_date={date}&per_page=100"
-        data = safe_request(url)
-        if data and "data" in data:
-            for g in data["data"]:
-                home = g["home_team"]["full_name"]
-                away = g["visitor_team"]["full_name"]
-                games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":home,"Odds":-110})
-                games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":away,"Odds":100})
-    return pd.DataFrame(games)
+def get_games_today():
+    # NBA games
+    nba_games = []
+    date = datetime.now().strftime("%Y-%m-%d")
+    nba_url = f"https://www.balldontlie.io/api/v1/games?start_date={date}&end_date={date}&per_page=100"
+    nba_data = safe_request(nba_url)
+    if nba_data and "data" in nba_data:
+        for g in nba_data["data"]:
+            home = g["home_team"]["full_name"]
+            away = g["visitor_team"]["full_name"]
+            nba_games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":home,"Odds":-110})
+            nba_games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":away,"Odds":100})
 
-def get_games_today_nhl():
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    games = []
-
-    # First try: daily schedule
-    url_daily = f"https://statsapi.web.nhl.com/api/v1/schedule?date={today_str}"
-    data = safe_request(url_daily)
-
-    # If that fails or no games, try weekly range
-    if not data or not data.get("dates"):
-        start_week = today_str
-        end_week = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
-        url_range = f"https://statsapi.web.nhl.com/api/v1/schedule?startDate={start_week}&endDate={end_week}"
-        data = safe_request(url_range)
-
-    # Parse results if available
-    if data and data.get("dates"):
-        for date_block in data["dates"]:
+    # NHL games
+    nhl_games = []
+    nhl_url = f"https://statsapi.web.nhl.com/api/v1/schedule?date={date}"
+    nhl_data = safe_request(nhl_url)
+    if nhl_data and nhl_data.get("dates"):
+        for date_block in nhl_data["dates"]:
             for g in date_block["games"]:
                 home = g["teams"]["home"]["team"]["name"]
                 away = g["teams"]["away"]["team"]["name"]
-                games.append({
-                    "Sport": "NHL",
-                    "Game": f"{away} @ {home}",
-                    "Team": home,
-                    "Odds": 120  # placeholder until real odds API added
-                })
-                games.append({
-                    "Sport": "NHL",
-                    "Game": f"{away} @ {home}",
-                    "Team": away,
-                    "Odds": -130
-                })
+                nhl_games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":home,"Odds":120})
+                nhl_games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":away,"Odds":-130})
 
-    return pd.DataFrame(games)
-
-def get_games_today():
-    nba_games = get_games_today_nba()
-    nhl_games = get_games_today_nhl()
-    games = pd.concat([nba_games, nhl_games], ignore_index=True)
+    games = pd.DataFrame(nba_games + nhl_games)
     if games.empty:
-        st.warning("No games found for today or upcoming.")
+        st.warning("No games found for today.")
     return games
 
 ############################################
-# SIMPLE LEARNING MODEL (NO ERRORS)
+# SIMPLE LEARNING MODEL
 ############################################
 
 def calculate_model_prob(row):
-    # Use historical record and simple stats
     history = load_history()
     if history.empty:
         return 0.53
@@ -127,7 +98,7 @@ def calculate_model_prob(row):
     return min(max(0.5 + (wins-total/2)/100, 0.45), 0.65)
 
 ############################################
-# AUTO RESULT CHECK (SIMULATED SAFE)
+# AUTO RESULT CHECK (SIMULATED)
 ############################################
 
 def update_results():
@@ -136,7 +107,6 @@ def update_results():
         return history
     for i,row in history.iterrows():
         if row["Result"]=="Pending":
-            # simulate final result (safe placeholder)
             history.at[i,"Result"] = np.random.choice(["Win","Loss"])
             history.at[i,"Units"] = 1 if history.at[i,"Result"]=="Win" else -1
     save_history(history)
@@ -165,7 +135,9 @@ games = get_games_today()
 if not games.empty:
     games["Model Probability %"] = games.apply(lambda r: round(calculate_model_prob(r)*100,1), axis=1)
     games["Implied Probability %"] = games["Odds"].apply(lambda x: round(american_to_prob(x)*100,1))
-    games["Confidence %"] = (games["Model Probability %"] - games["Implied Probability %"]).apply(lambda x: x if x > 0 else 0)
+    # Confidence bar (color-coded)
+    games["Confidence %"] = games["Model Probability %"] - games["Implied Probability %"]
+    games["Confidence %"] = games["Confidence %"].apply(lambda x: max(0,x))
     st.dataframe(games, use_container_width=True)
 else:
     st.warning("No games available to display today.")
