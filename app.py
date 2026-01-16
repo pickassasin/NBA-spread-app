@@ -52,17 +52,40 @@ def calculate_roi(df):
     return round(roi*100,2), record
 
 ############################################
-# MOCK GAME DATA (SAFE & ERROR-FREE)
+# FETCH TODAY'S NBA GAMES
 ############################################
 
-def get_games_today():
+def get_games_today_nba():
     today = datetime.now().strftime("%Y-%m-%d")
-    return pd.DataFrame([
-        {"Sport":"NBA","Game":"Lakers @ Suns","Team":"Lakers","Odds":-110},
-        {"Sport":"NBA","Game":"Celtics @ Heat","Team":"Celtics","Odds":-105},
-        {"Sport":"NHL","Game":"Rangers @ Bruins","Team":"Rangers","Odds":120},
-        {"Sport":"NHL","Game":"Oilers @ Canucks","Team":"Oilers","Odds":-130},
-    ])
+    url = f"https://www.balldontlie.io/api/v1/games?start_date={today}&end_date={today}&per_page=100"
+    data = safe_request(url)
+    games = []
+    if data and "data" in data:
+        for g in data["data"]:
+            home = g["home_team"]["full_name"]
+            away = g["visitor_team"]["full_name"]
+            # Default placeholder odds
+            games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":home,"Odds":-110})
+            games.append({"Sport":"NBA","Game":f"{away} @ {home}","Team":away,"Odds":100})
+    return pd.DataFrame(games)
+
+############################################
+# FETCH TODAY'S NHL GAMES
+############################################
+
+def get_games_today_nhl():
+    today = datetime.now().strftime("%Y-%m-%d")
+    url = f"https://statsapi.web.nhl.com/api/v1/schedule?date={today}"
+    data = safe_request(url)
+    games = []
+    if data and "dates" in data and len(data["dates"]) > 0:
+        for g in data["dates"][0]["games"]:
+            home = g["teams"]["home"]["team"]["name"]
+            away = g["teams"]["away"]["team"]["name"]
+            # Default placeholder odds
+            games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":home,"Odds":120})
+            games.append({"Sport":"NHL","Game":f"{away} @ {home}","Team":away,"Odds":-130})
+    return pd.DataFrame(games)
 
 ############################################
 # FIXED STAT-BASED MODEL
@@ -70,9 +93,8 @@ def get_games_today():
 
 def calculate_model_prob(row):
     """
-    Fixed model probability: uses multiple stats to give meaningful variation
+    Model probability: uses simple stats + random variation per team
     """
-    # Simulated stats per team
     np.random.seed(hash(row['Team']) % 2**32)
     recent_form = np.random.uniform(0.4, 0.7)   # last 5 games win rate
     offense = np.random.uniform(0.4, 0.7)       # scoring strength
@@ -80,7 +102,7 @@ def calculate_model_prob(row):
     home_adv = 0.05 if "@ " not in row["Game"].split(" @ ")[0] else 0
 
     prob = recent_form * 0.5 + offense * 0.3 + (1-defense) * 0.2 + home_adv
-    return min(max(prob, 0.05), 0.95)  # ensures probability is between 5% and 95%
+    return min(max(prob, 0.05), 0.95)
 
 ############################################
 # AUTO RESULT CHECK (SAFE)
@@ -124,15 +146,18 @@ st.divider()
 
 st.header("📅 Today's Games & Picks")
 
-games = get_games_today()
+# Fetch NBA + NHL games today
+nba_games = get_games_today_nba()
+nhl_games = get_games_today_nhl()
+games = pd.concat([nba_games, nhl_games], ignore_index=True)
 
-# ---------------- FIXED MODEL PROBABILITY ----------------
+# Model probabilities
 games["Model Probability %"] = games.apply(lambda r: round(calculate_model_prob(r)*100,1), axis=1)
 
 # Implied probability from odds
 games["Implied Probability %"] = games["Odds"].apply(lambda x: round(american_to_prob(x)*100,1))
 
-# ---------------- FIXED CONFIDENCE ----------------
+# Confidence / Edge
 games["Confidence %"] = games["Model Probability %"] - games["Implied Probability %"]
 games["Confidence %"] = games["Confidence %"].apply(lambda x: x if x > 0 else 0)
 
