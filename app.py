@@ -69,7 +69,6 @@ def get_games_today():
 ############################################
 
 def model_probability():
-    # Starts neutral, shifts based on history
     history = load_history()
     if history.empty:
         return 0.53
@@ -78,18 +77,34 @@ def model_probability():
     return min(max(0.5 + (wins-total/2)/100, 0.45), 0.65)
 
 ############################################
-# AUTO RESULT CHECK (SIMULATED SAFE)
+# AUTO RESULT CHECK (FIXED — NO EARLY LOSSES)
 ############################################
 
 def update_results():
     history = load_history()
     if history.empty:
         return history
-    for i,row in history.iterrows():
-        if row["Result"]=="Pending":
-            # simulate final result (safe placeholder)
-            history.at[i,"Result"] = np.random.choice(["Win","Loss"])
-            history.at[i,"Units"] = 1 if history.at[i,"Result"]=="Win" else -1
+
+    today = datetime.now().date()
+
+    for i, row in history.iterrows():
+        if row["Result"] != "Pending":
+            continue
+
+        try:
+            bet_date = datetime.strptime(row["Date"], "%Y-%m-%d").date()
+        except:
+            continue
+
+        # DO NOT grade games that haven't happened yet
+        if bet_date >= today:
+            continue
+
+        # Simulated grading (safe placeholder)
+        result = np.random.choice(["Win", "Loss"])
+        history.at[i, "Result"] = result
+        history.at[i, "Units"] = 1 if result == "Win" else -1
+
     save_history(history)
     return history
 
@@ -120,7 +135,7 @@ games["Implied Probability"] = games["Odds"].apply(lambda x: round(american_to_p
 st.dataframe(games, use_container_width=True)
 
 ############################################
-# BET SLIP (OPTION B FIX)
+# BET SLIP (CONFIRMATION SYSTEM)
 ############################################
 
 st.header("🧾 Bet Slip")
