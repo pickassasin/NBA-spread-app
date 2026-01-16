@@ -65,7 +65,6 @@ def get_live_odds(sport):
             home = g.get("home_team")
             away = g.get("away_team")
             game_str = f"{away} @ {home}"
-            # pick spread odds for NBA
             spread = next((m for m in g["bookmakers"][0]["markets"] if m["key"]=="spreads"), None)
             h2h = next((m for m in g["bookmakers"][0]["markets"] if m["key"]=="h2h"), None)
             if spread:
@@ -97,7 +96,6 @@ def calculate_model_prob(row):
     wins = len(history[history["Result"]=="Win"])
     total = len(history)
     base_prob = min(max(0.5 + (wins-total/2)/100, 0.45), 0.65)
-    # Adjust edge for NHL
     if row["Sport"]=="NHL":
         implied = american_to_prob(row["Odds"])
         return round((base_prob - implied)*100,1)
@@ -144,9 +142,29 @@ if games.empty:
 else:
     games["Model Probability %"] = games.apply(lambda r: round(calculate_model_prob(r)*100,1), axis=1)
     games["Implied Probability %"] = games["Odds"].apply(lambda x: round(american_to_prob(x)*100,1))
-    # Confidence bars
-    games["Confidence %"] = np.maximum(games["Model Probability %"] - games["Implied Probability %"],0)
-    st.dataframe(games, use_container_width=True)
+    
+    # Fixed Confidence % calculation
+    def calculate_confidence(row):
+        if row["Sport"] == "NHL":
+            edge = row["Model Probability %"] - row["Implied Probability %"]
+            return max(edge, 0)
+        else:
+            diff = row["Model Probability %"] - row["Implied Probability %"]
+            return max(diff, 0)
+
+    games["Confidence %"] = games.apply(calculate_confidence, axis=1)
+
+    # Color-coded bars
+    def color_confidence(val):
+        if val > 20:
+            color = 'green'
+        elif val > 10:
+            color = 'orange'
+        else:
+            color = 'red'
+        return f'background-color: {color}'
+
+    st.dataframe(games.style.applymap(color_confidence, subset=["Confidence %"]), use_container_width=True)
 
 ############################################
 # BET SLIP
