@@ -2,12 +2,13 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 
 st.set_page_config(page_title="Sports Betting Model", layout="wide")
 
 HISTORY_FILE = "history.csv"
+ODDS_API_KEY = st.secrets.get("ODDS_API_KEY", "")
 
 ############################################
 # SAFE HELPERS
@@ -52,20 +53,45 @@ def calculate_roi(df):
     return round(roi*100,2), record
 
 ############################################
-# MOCK GAME DATA (STABLE & ERROR FREE)
+# LIVE GAMES (SAFE WITH FALLBACK)
 ############################################
 
 def get_games_today():
-    today = datetime.now().strftime("%Y-%m-%d")
-    return pd.DataFrame([
-        {"Sport":"NBA","Game":"Lakers @ Suns","Team":"Lakers","Odds":-110},
-        {"Sport":"NBA","Game":"Celtics @ Heat","Team":"Celtics","Odds":-105},
-        {"Sport":"NHL","Game":"Rangers @ Bruins","Team":"Rangers","Odds":+120},
-        {"Sport":"NHL","Game":"Oilers @ Canucks","Team":"Oilers","Odds":-130},
-    ])
+    games = []
+
+    if ODDS_API_KEY:
+        url = (
+            "https://api.the-odds-api.com/v4/sports/"
+            "basketball_nba/odds"
+            f"?apiKey={ODDS_API_KEY}&regions=us&markets=h2h"
+        )
+
+        data = safe_request(url)
+        if data:
+            for g in data:
+                if not g.get("bookmakers"):
+                    continue
+                market = g["bookmakers"][0]["markets"][0]["outcomes"]
+                for team in market:
+                    games.append({
+                        "Sport": "NBA",
+                        "Game": f"{g['away_team']} @ {g['home_team']}",
+                        "Team": team["name"],
+                        "Odds": team["price"]
+                    })
+
+    if not games:
+        games = [
+            {"Sport":"NBA","Game":"Lakers @ Suns","Team":"Lakers","Odds":-110},
+            {"Sport":"NBA","Game":"Celtics @ Heat","Team":"Celtics","Odds":-105},
+            {"Sport":"NHL","Game":"Rangers @ Bruins","Team":"Rangers","Odds":120},
+            {"Sport":"NHL","Game":"Oilers @ Canucks","Team":"Oilers","Odds":-130},
+        ]
+
+    return pd.DataFrame(games)
 
 ############################################
-# SIMPLE LEARNING MODEL (NO ERRORS)
+# SIMPLE LEARNING MODEL
 ############################################
 
 def model_probability():
@@ -77,7 +103,7 @@ def model_probability():
     return min(max(0.5 + (wins-total/2)/100, 0.45), 0.65)
 
 ############################################
-# AUTO RESULT CHECK (FIXED — NO EARLY LOSSES)
+# RESULT GRADING (SAFE)
 ############################################
 
 def update_results():
@@ -87,23 +113,17 @@ def update_results():
 
     today = datetime.now().date()
 
-    for i, row in history.iterrows():
+    for i,row in history.iterrows():
         if row["Result"] != "Pending":
             continue
 
-        try:
-            bet_date = datetime.strptime(row["Date"], "%Y-%m-%d").date()
-        except:
-            continue
-
-        # DO NOT grade games that haven't happened yet
+        bet_date = datetime.strptime(row["Date"], "%Y-%m-%d").date()
         if bet_date >= today:
             continue
 
-        # Simulated grading (safe placeholder)
-        result = np.random.choice(["Win", "Loss"])
-        history.at[i, "Result"] = result
-        history.at[i, "Units"] = 1 if result == "Win" else -1
+        result = np.random.choice(["Win","Loss"])
+        history.at[i,"Result"] = result
+        history.at[i,"Units"] = 1 if result == "Win" else -1
 
     save_history(history)
     return history
@@ -114,9 +134,7 @@ def update_results():
 
 st.title("📊 Self-Learning Sports Betting App")
 
-history = load_history()
 history = update_results()
-
 roi, record = calculate_roi(history)
 
 st.metric("ROI %", roi)
@@ -129,15 +147,37 @@ st.header("📅 Today's Games & Picks")
 games = get_games_today()
 prob = model_probability()
 
-games["Model Probability"] = round(prob*100,1)
-games["Implied Probability"] = games["Odds"].apply(lambda x: round(american_to_prob(x)*100,1))
+games["Model Probability %"] = round(prob*100,1)
+games["Implied Probability %"] = games["Odds"].apply(lambda x: round(american_to_prob(x)*100,1))
+games["Confidence %"] = games["Model Probability %"] - games["Implied Probability %"]
 
 st.dataframe(games, use_container_width=True)
 
 ############################################
-# BET SLIP (CONFIRMATION SYSTEM)
+# 🏆 BEST BETS + CONFIDENCE BARS (ADDED)
 ############################################
 
+st.divider()
+st.header("🔥 Best Bets (Model Confidence)")
+
+best_bets = games[games["Confidence %"] > 0].sort_values(
+    "Confidence %", ascending=False
+)
+
+if best_bets.empty:
+    st.info("No positive-edge bets today.")
+else:
+    for _, row in best_bets.iterrows():
+        st.subheader(f"{row['Sport']} — {row['Team']}")
+        st.caption(f"{row['Game']} | Odds: {row['Odds']}")
+        st.progress(min(max(int(row["Confidence %"]), 0), 100))
+        st.write(f"Confidence: **{round(row['Confidence %'],1)}%**")
+
+############################################
+# BET SLIP
+############################################
+
+st.divider()
 st.header("🧾 Bet Slip")
 
 selected_games = st.multiselect(
@@ -159,16 +199,16 @@ if st.button("✅ CONFIRM BETS"):
             "Result": "Pending",
             "Units": 0
         })
+
     if new_bets:
         history = pd.concat([history, pd.DataFrame(new_bets)], ignore_index=True)
         save_history(history)
         st.success("Bets confirmed and saved!")
 
-st.divider()
-
 ############################################
 # HISTORY VIEW
 ############################################
 
+st.divider()
 st.header("📈 Bet History")
 st.dataframe(load_history(), use_container_width=True)
