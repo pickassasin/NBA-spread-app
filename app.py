@@ -93,18 +93,30 @@ def get_games_today():
 # MODEL PROBABILITY (STAT BASED)
 ############################################
 def calculate_model_prob(row):
+    """
+    Stat-based model probability for a team.
+    Uses:
+    - Team's average points scored per game (offense)
+    - Team's average points allowed per game (defense)
+    - Recent win rate (last 10 games)
+    Returns a probability between 0.05 and 0.95
+    """
     history = load_history()
     sport_hist = history[history["Sport"]==row["Sport"]]
-    if sport_hist.empty:
-        return 0.55
-
     team_hist = sport_hist[sport_hist["Bet"]==row["Team"]]
-    if team_hist.empty:
-        return 0.55
 
-    wins = len(team_hist[team_hist["Result"]=="Win"])
-    total = len(team_hist)
-    prob = wins / total if total > 0 else 0.55
+    if team_hist.empty:
+        return 0.55  # default if no data
+
+    # Basic stats
+    points_scored = team_hist.get("PointsScored", pd.Series([20]*len(team_hist))).mean()
+    points_allowed = team_hist.get("PointsAllowed", pd.Series([20]*len(team_hist))).mean()
+    recent_games = team_hist.tail(10)
+    recent_win_rate = len(recent_games[recent_games["Result"]=="Win"]) / max(len(recent_games),1)
+
+    # Combine into probability
+    stat_score = (points_scored - points_allowed)/100 + recent_win_rate  # normalized
+    prob = 0.5 + stat_score/2  # scale to [0,1] roughly
     return max(min(prob,0.95),0.05)
 
 ############################################
