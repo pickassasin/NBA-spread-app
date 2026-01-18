@@ -53,16 +53,22 @@ def get_games_today():
     if not API_KEY:
         return pd.DataFrame()
 
-    sports = {
-        "NBA": {"key": "basketball_nba", "market": "spreads"},
-        "NHL": {"key": "icehockey_nhl", "market": "h2h"}
+    sports_config = {
+        "NBA": {
+            "sport_key": "basketball_nba",
+            "market": "spreads"   # NBA = spread
+        },
+        "NHL": {
+            "sport_key": "icehockey_nhl",
+            "market": "h2h"       # NHL = moneyline
+        }
     }
 
     rows = []
 
-    for sport, cfg in sports.items():
+    for sport, cfg in sports_config.items():
         url = (
-            f"https://api.the-odds-api.com/v4/sports/{cfg['key']}/odds"
+            f"https://api.the-odds-api.com/v4/sports/{cfg['sport_key']}/odds"
             f"?apiKey={API_KEY}"
             f"&regions=us"
             f"&markets={cfg['market']}"
@@ -77,16 +83,32 @@ def get_games_today():
             if not g.get("bookmakers"):
                 continue
 
-            market = g["bookmakers"][0]["markets"][0]
+            # 🔑 SEARCH for the correct market across ALL bookmakers
+            market = None
+            for bm in g["bookmakers"]:
+                for m in bm.get("markets", []):
+                    if m.get("key") == cfg["market"]:
+                        market = m
+                        break
+                if market:
+                    break
 
-            for o in market["outcomes"]:
-                rows.append({
+            if not market:
+                continue  # no spread / h2h available yet
+
+            for o in market.get("outcomes", []):
+                row = {
                     "Sport": sport,
                     "Game": f"{g['away_team']} @ {g['home_team']}",
                     "Team": o["name"],
-                    "Line": o.get("point", 0),
                     "Odds": o["price"]
-                })
+                }
+
+                # NBA spreads include point spread
+                if cfg["market"] == "spreads":
+                    row["Spread"] = o.get("point")
+
+                rows.append(row)
 
     return pd.DataFrame(rows)
 
