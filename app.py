@@ -1,182 +1,166 @@
+# app.py
 import streamlit as st
-import pandas as pd
-import numpy as np
 import requests
-from datetime import datetime
+import pandas as pd
+import sqlite3
+from datetime import datetime, timedelta
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.preprocessing import StandardScaler
+import numpy as np
 import os
-
-st.set_page_config(page_title="NBA Betting Model", layout="wide")
-
-# -----------------------------
-# Constants
-# -----------------------------
-HISTORY_FILE = "history.csv"
+import pickle
 
 # -----------------------------
-# SAFE API KEY
+# CONFIG
 # -----------------------------
-try:
-    API_KEY = st.secrets["ODDS_API_KEY"]
-except KeyError:
-    st.error("⚠️ API key not found! Please add ODDS_API_KEY to your Streamlit secrets.")
-    st.stop()
+API_KEY = "1ba9374915afd7c955dfec5e98e8dbd9"
+SPORT = "basketball_nba"
+REGION = "us"
+MARKET = "spreads"
+DB_FILE = "nba_results.db"
+MODEL_FILE = "spread_model.pkl"
 
 # -----------------------------
-# HELPER FUNCTIONS
+# DATABASE FUNCTIONS
 # -----------------------------
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS results (
+            game_id TEXT PRIMARY KEY,
+            home_team TEXT,
+            away_team TEXT,
+            home_score INTEGER,
+            away_score INTEGER,
+            home_spread REAL,
+            away_spread REAL,
+            cover INTEGER,
+            commence_time TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-def safe_request(url):
-    try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except:
+def save_results(results_df):
+    conn = sqlite3.connect(DB_FILE)
+    results_df.to_sql('results', conn, if_exists='replace', index=False)
+    conn.close()
+
+def load_recent_results(days=3):
+    conn = sqlite3.connect(DB_FILE)
+    query = f"SELECT * FROM results WHERE commence_time >= datetime('now','-{days} days')"
+    df = pd.read_sql(query, conn)
+    conn.close()
+    return df
+
+# -----------------------------
+# API FUNCTIONS
+# -----------------------------
+def get_todays_games():
+    url = f"https://api.the-odds-api.com/v4/sports/{SPORT}/odds"
+    params = {
+        "apiKey": API_KEY,
+        "regions": REGION,
+        "markets": MARKET,
+        "dateFormat": "iso"
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+    
+    games = []
+    for game in data:
+        game_dict = {
+            "game_id": game['id'],
+            "home_team": game['home_team'],
+            "away_team": game['away_team'],
+            "commence_time": game['commence_time'],
+        }
+        # Get spreads from first bookmaker
+        if game['bookmakers']:
+            markets = game['bookmakers'][0]['markets']
+            if markets:
+                outcomes = markets[0]['outcomes']
+                for o in outcomes:
+                    if o['name'] == game['home_team']:
+                        game_dict['home_spread'] = o['point']
+                    elif o['name'] == game['away_team']:
+                        game_dict['away_spread'] = o['point']
+        games.append(game_dict)
+    return pd.DataFrame(games)
+
+# -----------------------------
+# MODEL FUNCTIONS
+# -----------------------------
+def train_model(results_df):
+    if results_df.empty:
+        st.warning("No past results yet. Using random predictions.")
         return None
-
-def american_to_prob(odds):
-    if odds > 0:
-        return 100 / (odds + 100)
-    else:
-        return -odds / (-odds + 100)
-
-# -----------------------------
-# HISTORY / TRACKING
-# -----------------------------
-
-def load_history():
-    if not os.path.exists(HISTORY_FILE):
-        return pd.DataFrame(columns=["Date","Game","Bet","Odds","Result","Units"])
-    return pd.read_csv(HISTORY_FILE)
-
-def save_history(df):
-    df.to_csv(HISTORY_FILE, index=False)
-
-def calculate_roi(df):
-    if df.empty:
-        return 0.0, "0-0"
-    wins = df[df["Result"]=="Win"]
-    losses = df[df["Result"]=="Loss"]
-    profit = wins["Units"].sum() - losses["Units"].sum()
-    roi = profit / max(len(df),1)
-    record = f"{len(wins)}-{len(losses)}"
-    return round(roi*100,2), record
-
-# -----------------------------
-# FETCH NBA GAMES & ODDS
-# -----------------------------
-def get_nba_games():
-    url = f"https://api.the-odds-api.com/v4/sports/basketball_nba/odds?apiKey={API_KEY}&regions=us&markets=spreads&oddsFormat=american"
-    data = safe_request(url)
-    if not data:
-        return pd.DataFrame()
     
-    games_list = []
-    for g in data:
-        for outcome in g.get("bookmakers", [{}])[0].get("markets", [{}])[0].get("outcomes", []):
-            games_list.append({
-                "Game": f"{g.get('home_team')} @ {g.get('away_team')}",
-                "Team": outcome.get("name"),
-                "Odds": outcome.get("price"),
-                "Home Team": g.get("home_team"),
-                "Away Team": g.get("away_team")
-            })
-    return pd.DataFrame(games_list).drop_duplicates(subset=["Game","Team"])
-
-# -----------------------------
-# STAT-BASED MODEL
-# -----------------------------
-def calculate_model_prob(row, history):
-    # Very simple example stat-based model:
-    # starts at 50%, adjusts based on past wins/losses for team
-    base = 0.50
-    team_games = history[history["Bet"]==row["Team"]]
-    if not team_games.empty:
-        wins = len(team_games[team_games["Result"]=="Win"])
-        total = len(team_games)
-        base += (wins - (total-wins)) * 0.02  # adjust by 2% per net win
-    return min(max(base,0.05),0.95)
-
-# -----------------------------
-# AUTO UPDATE RESULTS (SIMULATED)
-# -----------------------------
-def update_results(history):
-    if history.empty:
-        return history
-    for i,row in history.iterrows():
-        if row["Result"]=="Pending":
-            # placeholder simulation
-            history.at[i,"Result"] = np.random.choice(["Win","Loss"])
-            history.at[i,"Units"] = 1 if history.at[i,"Result"]=="Win" else -1
-    save_history(history)
-    return history
-
-# -----------------------------
-# APP UI
-# -----------------------------
-st.title("📊 NBA Self-Learning Betting Model")
-
-# Load & update history
-history = load_history()
-history = update_results(history)
-roi, record = calculate_roi(history)
-
-st.metric("ROI %", roi)
-st.metric("Record", record)
-st.divider()
-
-# Today's games
-st.header("📅 Today's NBA Games")
-games = get_nba_games()
-
-if games.empty:
-    st.warning("No NBA games or odds available for today.")
-else:
-    # calculate probabilities
-    games["Model Probability"] = games.apply(lambda r: round(calculate_model_prob(r, history)*100,1), axis=1)
-    games["Implied Probability"] = games["Odds"].apply(lambda x: round(american_to_prob(x)*100,1))
+    # Features: simple stats (can expand later)
+    results_df['home_adv'] = results_df['home_score'] - results_df['away_score']
+    results_df['cover'] = np.where(results_df['home_adv'] + results_df['home_spread'] > 0, 1, 0)
     
-    # Confidence color bar
-    def color_bar(val):
-        # green to light green
-        return f'background: linear-gradient(90deg, #4caf50 {val}%, transparent 0%)'
+    X = results_df[['home_spread', 'away_spread']]  # simple features
+    y = results_df['cover']
     
-    st.dataframe(games.style.applymap(lambda v: color_bar(v) if isinstance(v,(int,float)) else "", subset=["Model Probability"]), use_container_width=True)
-
-    # Best bets
-    st.header("🔥 Best Bets")
-    best_bets = games.sort_values("Model Probability", ascending=False).head(5)
-    st.dataframe(best_bets[["Game","Team","Odds","Model Probability"]], use_container_width=True)
-
-# -----------------------------
-# BET SLIP
-# -----------------------------
-st.header("🧾 Bet Slip")
-if not games.empty:
-    selected_games = st.multiselect(
-        "Select bets to confirm:",
-        games.index,
-        format_func=lambda i: f"{games.loc[i,'Game']} | {games.loc[i,'Team']} ({games.loc[i,'Odds']})"
-    )
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
     
-    if st.button("✅ CONFIRM BETS"):
-        new_bets = []
-        for i in selected_games:
-            row = games.loc[i]
-            new_bets.append({
-                "Date": datetime.now().strftime("%Y-%m-%d"),
-                "Game": row["Game"],
-                "Bet": row["Team"],
-                "Odds": row["Odds"],
-                "Result": "Pending",
-                "Units": 0
-            })
-        if new_bets:
-            history = pd.concat([history, pd.DataFrame(new_bets)], ignore_index=True)
-            save_history(history)
-            st.success("Bets confirmed and saved!")
+    model = GradientBoostingClassifier()
+    model.fit(X_scaled, y)
+    
+    # Save model and scaler
+    with open(MODEL_FILE, 'wb') as f:
+        pickle.dump((model, scaler), f)
+    
+    return model, scaler
+
+def predict_cover(model_scaler, games_df):
+    if model_scaler is None:
+        return np.random.rand(len(games_df))  # fallback random probabilities
+    
+    model, scaler = model_scaler
+    X_pred = games_df[['home_spread', 'away_spread']].fillna(0)
+    X_scaled = scaler.transform(X_pred)
+    preds = model.predict_proba(X_scaled)[:,1]
+    return preds
 
 # -----------------------------
-# HISTORY VIEW
+# STREAMLIT APP
 # -----------------------------
-st.header("📈 Bet History")
-st.dataframe(history, use_container_width=True)
+st.title("NBA Spread Predictor")
+
+# Initialize DB
+init_db()
+
+# Pull today's games
+st.subheader("Today's NBA Games")
+games = get_todays_games()
+st.dataframe(games)
+
+# Load recent results & train model
+recent_results = load_recent_results(days=3)
+model_scaler = train_model(recent_results)
+
+# Predict % chance to cover
+games['pred_cover_prob'] = predict_cover(model_scaler, games) * 100
+games['pred_cover_prob'] = games['pred_cover_prob'].round(1)
+
+st.subheader("Predicted Chance to Cover Spread")
+st.dataframe(games[['home_team', 'away_team', 'home_spread', 'away_spread', 'pred_cover_prob']])
+
+# -----------------------------
+# OPTIONAL: Update DB with actual results (if API provides results)
+# -----------------------------
+if st.button("Fetch Yesterday's Results & Update DB"):
+    st.info("Fetching results...")
+    # You'd call the odds API / another source for final scores here
+    # Example: just simulating results
+    results_df = games.copy()
+    results_df['home_score'] = np.random.randint(90, 130, len(results_df))
+    results_df['away_score'] = np.random.randint(90, 130, len(results_df))
+    results_df['cover'] = np.where(results_df['home_score'] + results_df['home_spread'] > results_df['away_score'], 1, 0)
+    
+    save_results(results_df)
+    st.success("Results saved! Model will use these for next predictions.")
