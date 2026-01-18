@@ -206,8 +206,22 @@ features = generate_features(games, recent_results)
 # Predict probability to cover
 games['pred_cover_prob'] = predict_cover(model_scaler, features).round(1)
 
-st.subheader("Predicted Chance to Cover Spread")
-st.dataframe(games[['home_team', 'away_team', 'home_spread', 'away_spread', 'pred_cover_prob']])
+# -----------------------------
+# ADD BET RECOMMENDATION
+# -----------------------------
+def bet_recommendation(row):
+    prob = row['pred_cover_prob']
+    if prob > 55:
+        return f"Bet on {row['home_team']}"
+    elif prob < 45:
+        return f"Bet on {row['away_team']}"
+    else:
+        return "No Clear Bet"
+
+games['Bet Recommendation'] = games.apply(bet_recommendation, axis=1)
+
+st.subheader("Predicted Chance to Cover Spread with Bet Recommendation")
+st.dataframe(games[['home_team', 'away_team', 'home_spread', 'away_spread', 'pred_cover_prob', 'Bet Recommendation']])
 
 # -----------------------------
 # Update DB with actual results (button)
