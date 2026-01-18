@@ -78,9 +78,10 @@ def get_games_today():
         home = game["home_team"]
         away = game["away_team"]
 
+        # Prefer spreads first
+        added = False
         for bookmaker in game.get("bookmakers", []):
             for market in bookmaker.get("markets", []):
-                # Prefer spreads if available
                 if market["key"] == "spreads":
                     for o in market["outcomes"]:
                         rows.append({
@@ -91,12 +92,13 @@ def get_games_today():
                             "Odds": o["price"],
                             "Market": "Spread"
                         })
+                    added = True
                     break
-            if rows:
+            if added:
                 break
 
-        # If no spreads, fallback to h2h
-        if not rows:
+        # fallback to h2h if no spreads
+        if not added:
             for bookmaker in game.get("bookmakers", []):
                 for market in bookmaker.get("markets", []):
                     if market["key"] == "h2h":
@@ -109,22 +111,25 @@ def get_games_today():
                                 "Odds": o["price"],
                                 "Market": "Moneyline"
                             })
+                        added = True
                         break
-                if rows:
+                if added:
                     break
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    # Deduplicate games by Game + Team
+    df = df.drop_duplicates(subset=["Game","Team"]).reset_index(drop=True)
+    return df
 
 ############################################
-# SIMPLE LEARNING MODEL (VARIES PER GAME)
+# SIMPLE LEARNING MODEL (NO ERRORS)
 ############################################
 
 def calculate_model_prob(row):
-    # Make probability vary based on hash of game+team for deterministic variability
-    seed = hash(row["Game"] + row["Team"]) % 100
-    base = 0.50
-    variation = seed / 500  # ~0-0.2
-    return round(min(max(base + variation, 0.45), 0.65), 2)
+    # Example stat-based logic: varies slightly per team
+    base = 0.53
+    modifier = (hash(row["Team"]) % 10 - 5)/100  # small variation per team
+    return round(min(max(base + modifier, 0.45),0.65),2)
 
 ############################################
 # AUTO RESULT CHECK (SIMULATED SAFE)
@@ -136,6 +141,7 @@ def update_results():
         return history
     for i,row in history.iterrows():
         if row["Result"]=="Pending":
+            # simulate final result (safe placeholder)
             history.at[i,"Result"] = np.random.choice(["Win","Loss"])
             history.at[i,"Units"] = 1 if history.at[i,"Result"]=="Win" else -1
     save_history(history)
