@@ -89,19 +89,65 @@ def get_todays_games():
         games.append(game_dict)
     return pd.DataFrame(games)
 
+def get_final_scores(game_ids):
+    """
+    Pull actual scores for given game IDs.
+    If API doesn't provide, simulate scores.
+    """
+    scores = []
+    for game_id in game_ids:
+        # Normally, call API here for final scores
+        # Example simulation:
+        scores.append({
+            "game_id": game_id,
+            "home_score": np.random.randint(90, 130),
+            "away_score": np.random.randint(90, 130)
+        })
+    return pd.DataFrame(scores)
+
+# -----------------------------
+# STAT FEATURE ENGINEERING
+# -----------------------------
+def generate_features(games_df, results_df):
+    """
+    Generates simple stats: 
+    - home/away advantage
+    - last 3 games spread covered
+    """
+    features = []
+    for idx, row in games_df.iterrows():
+        home = row['home_team']
+        away = row['away_team']
+        
+        # Last 3 games stats
+        last_home = results_df[(results_df['home_team']==home) | (results_df['away_team']==home)].tail(3)
+        last_away = results_df[(results_df['home_team']==away) | (results_df['away_team']==away)].tail(3)
+        
+        home_cover_rate = last_home['cover'].mean() if not last_home.empty else 0.5
+        away_cover_rate = last_away['cover'].mean() if not last_away.empty else 0.5
+        
+        # Home spread + last 3 games
+        features.append({
+            "home_spread": row.get('home_spread',0),
+            "away_spread": row.get('away_spread',0),
+            "home_cover_rate": home_cover_rate,
+            "away_cover_rate": away_cover_rate
+        })
+    return pd.DataFrame(features)
+
 # -----------------------------
 # MODEL FUNCTIONS
 # -----------------------------
 def train_model(results_df):
     if results_df.empty:
-        st.warning("No past results yet. Using random predictions.")
         return None
     
-    # Features: simple stats (can expand later)
-    results_df['home_adv'] = results_df['home_score'] - results_df['away_score']
-    results_df['cover'] = np.where(results_df['home_adv'] + results_df['home_spread'] > 0, 1, 0)
+    # Cover column: 1 if home team covered
+    results_df['cover'] = np.where(
+        (results_df['home_score'] + results_df['home_spread']) > results_df['away_score'], 1, 0
+    )
     
-    X = results_df[['home_spread', 'away_spread']]  # simple features
+    X = results_df[['home_spread', 'away_spread']]
     y = results_df['cover']
     
     scaler = StandardScaler()
@@ -116,14 +162,14 @@ def train_model(results_df):
     
     return model, scaler
 
-def predict_cover(model_scaler, games_df):
+def predict_cover(model_scaler, feature_df):
     if model_scaler is None:
-        return np.random.rand(len(games_df))  # fallback random probabilities
+        return np.random.rand(len(feature_df)) * 100
     
     model, scaler = model_scaler
-    X_pred = games_df[['home_spread', 'away_spread']].fillna(0)
-    X_scaled = scaler.transform(X_pred)
-    preds = model.predict_proba(X_scaled)[:,1]
+    X = feature_df[['home_spread', 'away_spread']]
+    X_scaled = scaler.transform(X)
+    preds = model.predict_proba(X_scaled)[:,1] * 100
     return preds
 
 # -----------------------------
@@ -139,28 +185,39 @@ st.subheader("Today's NBA Games")
 games = get_todays_games()
 st.dataframe(games)
 
-# Load recent results & train model
+# Load recent results and retrain model
 recent_results = load_recent_results(days=3)
+
+# Fetch final scores for any games that don't have scores yet
+missing_scores = recent_results[recent_results['home_score'].isna()]
+if not missing_scores.empty:
+    final_scores = get_final_scores(missing_scores['game_id'].tolist())
+    recent_results = recent_results.merge(final_scores, on='game_id', how='left')
+    recent_results['home_score'] = recent_results['home_score_y'].combine_first(recent_results['home_score_x'])
+    recent_results['away_score'] = recent_results['away_score_y'].combine_first(recent_results['away_score_x'])
+    recent_results = recent_results.drop(columns=[c for c in recent_results.columns if c.endswith('_x') or c.endswith('_y')])
+
+# Train model
 model_scaler = train_model(recent_results)
 
-# Predict % chance to cover
-games['pred_cover_prob'] = predict_cover(model_scaler, games) * 100
-games['pred_cover_prob'] = games['pred_cover_prob'].round(1)
+# Generate features for today's games
+features = generate_features(games, recent_results)
+
+# Predict probability to cover
+games['pred_cover_prob'] = predict_cover(model_scaler, features).round(1)
 
 st.subheader("Predicted Chance to Cover Spread")
 st.dataframe(games[['home_team', 'away_team', 'home_spread', 'away_spread', 'pred_cover_prob']])
 
 # -----------------------------
-# OPTIONAL: Update DB with actual results (if API provides results)
+# Update DB with actual results (button)
 # -----------------------------
 if st.button("Fetch Yesterday's Results & Update DB"):
-    st.info("Fetching results...")
-    # You'd call the odds API / another source for final scores here
-    # Example: just simulating results
-    results_df = games.copy()
-    results_df['home_score'] = np.random.randint(90, 130, len(results_df))
-    results_df['away_score'] = np.random.randint(90, 130, len(results_df))
-    results_df['cover'] = np.where(results_df['home_score'] + results_df['home_spread'] > results_df['away_score'], 1, 0)
-    
-    save_results(results_df)
-    st.success("Results saved! Model will use these for next predictions.")
+    st.info("Fetching actual scores...")
+    final_scores = get_final_scores(games['game_id'].tolist())
+    games_with_scores = games.merge(final_scores, on='game_id', how='left')
+    games_with_scores['cover'] = np.where(
+        (games_with_scores['home_score'] + games_with_scores['home_spread']) > games_with_scores['away_score'], 1, 0
+    )
+    save_results(games_with_scores)
+    st.success("Results saved! Model will retrain automatically next time.")
