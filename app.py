@@ -49,66 +49,45 @@ def calculate_roi(df):
 # ---------------- LIVE GAMES (NBA SPREADS, NHL ML) ---------------- #
 
 def get_games_today():
-    API_KEY = st.secrets.get("ODDS_API_KEY", "")
+    API_KEY = st.secrets.get("ODDS_API_KEY")
     if not API_KEY:
         return pd.DataFrame()
 
-    sports_config = {
-        "NBA": {
-            "sport_key": "basketball_nba",
-            "market": "spreads"   # NBA = spread
-        },
-        "NHL": {
-            "sport_key": "icehockey_nhl",
-            "market": "h2h"       # NHL = moneyline
-        }
-    }
+    url = (
+        "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+        f"?apiKey={API_KEY}"
+        "&regions=us"
+        "&markets=spreads"
+        "&oddsFormat=american"
+    )
+
+    data = safe_request(url)
+    if not data:
+        return pd.DataFrame()
 
     rows = []
 
-    for sport, cfg in sports_config.items():
-        url = (
-            f"https://api.the-odds-api.com/v4/sports/{cfg['sport_key']}/odds"
-            f"?apiKey={API_KEY}"
-            f"&regions=us"
-            f"&markets={cfg['market']}"
-            f"&oddsFormat=american"
-        )
+    for game in data:
+        home = game["home_team"]
+        away = game["away_team"]
 
-        data = safe_request(url)
-        if not data:
-            continue
+        for bookmaker in game["bookmakers"]:
+            for market in bookmaker["markets"]:
+                if market["key"] != "spreads":
+                    continue
 
-        for g in data:
-            if not g.get("bookmakers"):
-                continue
+                for outcome in market["outcomes"]:
+                    rows.append({
+                        "Sport": "NBA",
+                        "Game": f"{away} @ {home}",
+                        "Team": outcome["name"],
+                        "Spread": outcome["point"],
+                        "Odds": outcome["price"]
+                    })
 
-            # 🔑 SEARCH for the correct market across ALL bookmakers
-            market = None
-            for bm in g["bookmakers"]:
-                for m in bm.get("markets", []):
-                    if m.get("key") == cfg["market"]:
-                        market = m
-                        break
-                if market:
-                    break
-
-            if not market:
-                continue  # no spread / h2h available yet
-
-            for o in market.get("outcomes", []):
-                row = {
-                    "Sport": sport,
-                    "Game": f"{g['away_team']} @ {g['home_team']}",
-                    "Team": o["name"],
-                    "Odds": o["price"]
-                }
-
-                # NBA spreads include point spread
-                if cfg["market"] == "spreads":
-                    row["Spread"] = o.get("point")
-
-                rows.append(row)
+                # ✅ stop after first valid spreads market
+                break
+            break
 
     return pd.DataFrame(rows)
 
